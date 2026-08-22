@@ -36,6 +36,11 @@ pub struct SqlParams {
     pub sql: Option<String>,
 }
 
+/// Strips unnecessary line-breaks, tabs, duplicate spaces, and surrounding whitespace from a SQL query.
+pub fn clean_query(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Creates the Axum router configured with the shared SQLite connection state.
 pub fn create_router(db: Connection) -> Router {
     Router::new().route("/", get(root)).with_state(db)
@@ -47,8 +52,9 @@ pub async fn root(
     State(db): State<Connection>,
     Query(params): Query<SqlParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sql = params.sql.unwrap_or_default();
-    tracing::info!("{} | SQL: [{:?}]", client_address, sql);
+    let sql = clean_query(&params.sql.unwrap_or_default());
+    let client_ip = client_address.ip();
+    tracing::info!("{client_ip} | {sql}");
 
     if sql.is_empty() {
         return Err(AppError::BadRequest("Error: No SQL query provided\r\n"));
@@ -60,4 +66,40 @@ pub async fn root(
         [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
         csv_data,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_query_basic() {
+        assert_eq!(clean_query("SELECT * FROM users"), "SELECT * FROM users");
+    }
+
+    #[test]
+    fn test_clean_query_line_breaks_and_tabs() {
+        let input = "SELECT\n    id,\n    name\nFROM\n    users\nWHERE\n    age > 20";
+        assert_eq!(
+            clean_query(input),
+            "SELECT id, name FROM users WHERE age > 20"
+        );
+
+        let input_crlf = "SELECT\r\n\tid,\r\n\tname\r\nFROM\r\n\tusers";
+        assert_eq!(clean_query(input_crlf), "SELECT id, name FROM users");
+    }
+
+    #[test]
+    fn test_clean_query_extra_whitespace() {
+        assert_eq!(
+            clean_query("   SELECT    *    FROM    users   "),
+            "SELECT * FROM users"
+        );
+    }
+
+    #[test]
+    fn test_clean_query_empty_and_whitespace_only() {
+        assert_eq!(clean_query(""), "");
+        assert_eq!(clean_query("   \n\t\r\n   "), "");
+    }
 }
