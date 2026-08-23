@@ -20,6 +20,7 @@
 
 /// CSV formatting, escaping, and record serialization.
 pub mod csv;
+pub use csv::CsvWriter;
 
 /// SQLite database connection setup and query execution.
 pub mod db;

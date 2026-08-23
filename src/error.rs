@@ -17,14 +17,14 @@
 //! Error types and HTTP response mappings for client and database errors.
 //!
 
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 /// Application-level errors returned by HTTP request handlers.
 #[derive(Debug)]
 pub enum AppError {
-    /// Invalid client input or missing query parameters (HTTP 400).
-    BadRequest(&'static str),
+    /// Invalid client input, missing query parameters, or malformed SQL queries (HTTP 400).
+    BadRequest(String),
     /// Database execution or connection failure (HTTP 500).
     Database(tokio_rusqlite::Error),
 }
@@ -32,12 +32,18 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            AppError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                message,
+            )
+                .into_response(),
             AppError::Database(error) => {
                 tracing::error!("Database query error: {error}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DB Query error: {error:?}\r\n"),
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    format!("Database query error: {error}\r\n"),
                 )
                     .into_response()
             }
@@ -48,5 +54,11 @@ impl IntoResponse for AppError {
 impl From<tokio_rusqlite::Error> for AppError {
     fn from(error: tokio_rusqlite::Error) -> Self {
         AppError::Database(error)
+    }
+}
+
+impl From<&'static str> for AppError {
+    fn from(message: &'static str) -> Self {
+        AppError::BadRequest(message.to_string())
     }
 }

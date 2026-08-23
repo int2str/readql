@@ -24,11 +24,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use axum::body::Body;
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use tokio_rusqlite::rusqlite::Statement;
 use tokio_rusqlite::{Connection, OpenFlags};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::csv::{CsvFormatter, write_header};
+use crate::AppError;
+use crate::csv::CsvWriter;
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB per CSV chunk
 const CHANNEL_CAPACITY: usize = 16; // Max 16 chunks buffered (~1 MB max in-memory)
@@ -115,91 +115,95 @@ pub async fn open_file(database_path: &Path) -> Result<Connection, tokio_rusqlit
     open_connection(database_path).await
 }
 
-/// Flushes the current buffer as a byte chunk over the channel.
-/// Returns `false` if the receiver has disconnected.
-fn flush_chunk(buffer: &mut String, sender: &mpsc::Sender<Result<Bytes, std::io::Error>>) -> bool {
-    let chunk = Bytes::from(std::mem::take(buffer));
-    buffer.reserve(CHUNK_SIZE + 4096);
-    sender.blocking_send(Ok(chunk)).is_ok()
-}
-
-/// Iterates rows of a prepared query statement, formatting and streaming chunks.
-fn stream_rows(statement: &mut Statement, sender: mpsc::Sender<Result<Bytes, std::io::Error>>) {
-    let column_names = statement.column_names();
-    let column_count = column_names.len();
-
-    let mut formatter = CsvFormatter::new();
-    let mut buffer = String::with_capacity(CHUNK_SIZE + 4096);
-
-    if !column_names.is_empty() {
-        write_header(&mut buffer, column_names.iter().copied());
-    }
-
-    let mut rows = match statement.query([]) {
-        Ok(query_rows) => query_rows,
-        Err(error) => {
-            tracing::error!("Failed to execute query: {error}");
-            let _ = sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-            return;
-        }
-    };
-
-    loop {
-        match rows.next() {
-            Ok(Some(row)) => {
-                if let Err(error) = formatter.write_row(&mut buffer, row, column_count) {
-                    tracing::error!("Failed to format CSV row: {error}");
-                    let _ = sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-                    return;
-                }
-
-                if buffer.len() >= CHUNK_SIZE && !flush_chunk(&mut buffer, &sender) {
-                    return; // Client disconnected early
-                }
-            }
-            Ok(None) => break,
-            Err(error) => {
-                tracing::error!("Failed to fetch next row: {error}");
-                let _ = sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-                return;
-            }
-        }
-    }
-
-    if !buffer.is_empty() {
-        flush_chunk(&mut buffer, &sender);
-    }
-}
-
-/// Executes a prepared query on the SQLite connection and streams the CSV result.
-fn execute_stream(
-    connection: &mut tokio_rusqlite::rusqlite::Connection,
-    sql_query: &str,
-    sender: mpsc::Sender<Result<Bytes, std::io::Error>>,
-) {
-    let mut statement = match connection.prepare(sql_query) {
-        Ok(prepared_statement) => prepared_statement,
-        Err(error) => {
-            tracing::error!("Failed to prepare SQL statement: {error}");
-            let _ = sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-            return;
-        }
-    };
-
-    stream_rows(&mut statement, sender);
-}
-
 /// Executes a SQL query against the database and streams the RFC 4180 CSV result
-/// in chunks as an Axum `Body`.
-pub fn query_as_csv_stream(connection: &Connection, sql_query: String) -> Body {
-    let (sender, receiver) = mpsc::channel(CHANNEL_CAPACITY);
+/// in chunks as an Axum `Body`. Fails early if the SQL statement cannot be prepared.
+pub async fn query_as_csv_stream(
+    connection: &Connection,
+    sql_query: String,
+) -> Result<Body, AppError> {
+    let (chunk_sender, chunk_receiver) = mpsc::channel(CHANNEL_CAPACITY);
+    let (prepared_sender, prepared_receiver) = tokio::sync::oneshot::channel();
     let connection_clone = connection.clone();
 
     tokio::spawn(async move {
         let result = connection_clone
             .call(move |raw_connection| {
-                execute_stream(raw_connection, &sql_query, sender);
-                Ok::<(), tokio_rusqlite::rusqlite::Error>(())
+                let mut prepared_statement = match raw_connection.prepare(&sql_query) {
+                    Ok(statement) => {
+                        let _ = prepared_sender.send(Ok(()));
+                        statement
+                    }
+                    Err(error) => {
+                        let _ = prepared_sender.send(Err(error));
+                        return Ok::<(), tokio_rusqlite::rusqlite::Error>(());
+                    }
+                };
+
+                let column_names: Vec<String> = prepared_statement
+                    .column_names()
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                let column_count = column_names.len();
+
+                let mut output_buffer = Vec::with_capacity(CHUNK_SIZE + 4096);
+                let mut csv_writer = CsvWriter::new(&mut output_buffer);
+
+                if !column_names.is_empty() {
+                    let header_names: Vec<&str> = column_names.iter().map(String::as_str).collect();
+                    if let Err(error) = csv_writer.write_header(header_names) {
+                        tracing::error!("Failed to write CSV header: {error}");
+                        let _ = chunk_sender
+                            .blocking_send(Err(std::io::Error::other(error.to_string())));
+                        return Ok(());
+                    }
+                }
+
+                let mut query_rows = match prepared_statement.query([]) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        tracing::error!("Failed to execute query: {error}");
+                        let _ = chunk_sender
+                            .blocking_send(Err(std::io::Error::other(error.to_string())));
+                        return Ok(());
+                    }
+                };
+
+                loop {
+                    match query_rows.next() {
+                        Ok(Some(row)) => {
+                            if let Err(error) = csv_writer.write_row(row, column_count) {
+                                tracing::error!("Failed to write CSV row: {error}");
+                                let _ = chunk_sender
+                                    .blocking_send(Err(std::io::Error::other(error.to_string())));
+                                return Ok(());
+                            }
+
+                            if csv_writer.get_ref().len() >= CHUNK_SIZE {
+                                let chunk_bytes = Bytes::copy_from_slice(csv_writer.get_ref());
+                                csv_writer.get_mut().clear();
+                                if chunk_sender.blocking_send(Ok(chunk_bytes)).is_err() {
+                                    return Ok(()); // Client disconnected early
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::error!("Failed to fetch next row: {error}");
+                            let _ = chunk_sender
+                                .blocking_send(Err(std::io::Error::other(error.to_string())));
+                            return Ok(());
+                        }
+                    }
+                }
+
+                if !csv_writer.get_ref().is_empty() {
+                    let chunk_bytes = Bytes::copy_from_slice(csv_writer.get_ref());
+                    csv_writer.get_mut().clear();
+                    let _ = chunk_sender.blocking_send(Ok(chunk_bytes));
+                }
+
+                Ok(())
             })
             .await;
 
@@ -208,7 +212,15 @@ pub fn query_as_csv_stream(connection: &Connection, sql_query: String) -> Body {
         }
     });
 
-    Body::from_stream(ReceiverStream::new(receiver))
+    match prepared_receiver.await {
+        Ok(Ok(())) => Ok(Body::from_stream(ReceiverStream::new(chunk_receiver))),
+        Ok(Err(error)) => Err(AppError::BadRequest(format!(
+            "SQL query error: {error}\r\n"
+        ))),
+        Err(_) => Err(AppError::BadRequest(
+            "Failed to initialize query stream\r\n".to_string(),
+        )),
+    }
 }
 
 /// Executes a SQL query against the database and returns the result formatted
@@ -220,22 +232,33 @@ pub async fn query_as_csv(
     connection
         .call(move |raw_connection| {
             let mut prepared_statement = raw_connection.prepare(&sql_query)?;
-            let column_names = prepared_statement.column_names();
+            let column_names: Vec<String> = prepared_statement
+                .column_names()
+                .into_iter()
+                .map(String::from)
+                .collect();
             let column_count = column_names.len();
 
-            let mut csv_output = String::with_capacity(CHUNK_SIZE);
-            let mut formatter = CsvFormatter::new();
+            let mut output_buffer = Vec::with_capacity(CHUNK_SIZE);
+            let mut csv_writer = CsvWriter::new(&mut output_buffer);
 
             if !column_names.is_empty() {
-                write_header(&mut csv_output, column_names.iter().copied());
+                let header_names: Vec<&str> = column_names.iter().map(String::as_str).collect();
+                csv_writer.write_header(header_names).map_err(|error| {
+                    tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                })?;
             }
 
-            let mut rows = prepared_statement.query([])?;
-            while let Some(row) = rows.next()? {
-                formatter.write_row(&mut csv_output, row, column_count)?;
+            let mut query_rows = prepared_statement.query([])?;
+            while let Some(row) = query_rows.next()? {
+                csv_writer.write_row(row, column_count)?;
             }
 
-            Ok(csv_output)
+            let csv_string = String::from_utf8(output_buffer).map_err(|error| {
+                tokio_rusqlite::rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+            })?;
+
+            Ok(csv_string)
         })
         .await
 }
@@ -266,10 +289,20 @@ mod tests {
             "id,name,price\r\n1,apple,1.25\r\n2,banana,0.75\r\n"
         );
 
-        let body = query_as_csv_stream(&connection, "SELECT * FROM items ORDER BY id".to_string());
+        let body = query_as_csv_stream(&connection, "SELECT * FROM items ORDER BY id".to_string())
+            .await
+            .unwrap();
         let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert_eq!(text, "id,name,price\r\n1,apple,1.25\r\n2,banana,0.75\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_query_as_csv_stream_invalid_query() {
+        let connection = Connection::open_in_memory().await.unwrap();
+        let result =
+            query_as_csv_stream(&connection, "SELECT * FROM nonexistent_table".to_string()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

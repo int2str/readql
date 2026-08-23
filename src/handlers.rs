@@ -35,8 +35,8 @@ pub struct SqlParameters {
     pub sql: Option<String>,
 }
 
-/// Strips unnecessary line-breaks, tabs, duplicate spaces, and surrounding whitespace from a SQL query.
-pub fn clean_query(sql_query: &str) -> String {
+/// Formats a SQL query as a single line for structured logging without mutating the underlying SQL query.
+pub fn format_query_for_logging(sql_query: &str) -> String {
     sql_query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -53,16 +53,21 @@ pub async fn root(
     State(connection_pool): State<ConnectionPool>,
     Query(parameters): Query<SqlParameters>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sql_query = clean_query(&parameters.sql.unwrap_or_default());
-    let client_ip_address = client_address.ip();
-    tracing::info!("{client_ip_address} | {sql_query}");
+    let raw_sql_query = parameters.sql.unwrap_or_default();
+    let sql_query = raw_sql_query.trim();
 
     if sql_query.is_empty() {
-        return Err(AppError::BadRequest("Error: No SQL query provided\r\n"));
+        return Err(AppError::BadRequest(
+            "Error: No SQL query provided\r\n".to_string(),
+        ));
     }
 
+    let client_ip_address = client_address.ip();
+    let single_line_query_log = format_query_for_logging(sql_query);
+    tracing::info!("{client_ip_address} | {single_line_query_log}");
+
     let connection = connection_pool.get_connection();
-    let response_body = db::query_as_csv_stream(&connection, sql_query);
+    let response_body = db::query_as_csv_stream(&connection, sql_query.to_string()).await?;
 
     Ok((
         [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
@@ -76,34 +81,40 @@ mod tests {
     use tokio_rusqlite::Connection;
 
     #[test]
-    fn test_clean_query_basic() {
-        assert_eq!(clean_query("SELECT * FROM users"), "SELECT * FROM users");
-    }
-
-    #[test]
-    fn test_clean_query_line_breaks_and_tabs() {
-        let input = "SELECT\n    id,\n    name\nFROM\n    users\nWHERE\n    age > 20";
+    fn test_format_query_for_logging_basic() {
         assert_eq!(
-            clean_query(input),
-            "SELECT id, name FROM users WHERE age > 20"
-        );
-
-        let input_crlf = "SELECT\r\n\tid,\r\n\tname\r\nFROM\r\n\tusers";
-        assert_eq!(clean_query(input_crlf), "SELECT id, name FROM users");
-    }
-
-    #[test]
-    fn test_clean_query_extra_whitespace() {
-        assert_eq!(
-            clean_query("   SELECT    *    FROM    users   "),
+            format_query_for_logging("SELECT * FROM users"),
             "SELECT * FROM users"
         );
     }
 
     #[test]
-    fn test_clean_query_empty_and_whitespace_only() {
-        assert_eq!(clean_query(""), "");
-        assert_eq!(clean_query("   \n\t\r\n   "), "");
+    fn test_format_query_for_logging_line_breaks_and_tabs() {
+        let input = "SELECT\n    id,\n    name\nFROM\n    users\nWHERE\n    age > 20";
+        assert_eq!(
+            format_query_for_logging(input),
+            "SELECT id, name FROM users WHERE age > 20"
+        );
+
+        let input_crlf = "SELECT\r\n\tid,\r\n\tname\r\nFROM\r\n\tusers";
+        assert_eq!(
+            format_query_for_logging(input_crlf),
+            "SELECT id, name FROM users"
+        );
+    }
+
+    #[test]
+    fn test_format_query_for_logging_extra_whitespace() {
+        assert_eq!(
+            format_query_for_logging("   SELECT    *    FROM    users   "),
+            "SELECT * FROM users"
+        );
+    }
+
+    #[test]
+    fn test_format_query_for_logging_empty_and_whitespace_only() {
+        assert_eq!(format_query_for_logging(""), "");
+        assert_eq!(format_query_for_logging("   \n\t\r\n   "), "");
     }
 
     #[tokio::test]
@@ -151,6 +162,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_root_handler_preserves_string_literal_whitespace() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+'hello+++world'+AS+message")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body_string = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(body_string, "message\r\nhello   world\r\n");
+    }
+
+    #[tokio::test]
     async fn test_root_handler_empty_query() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
@@ -164,6 +205,30 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_invalid_query() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+*+FROM+nonexistent_table")
                     .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
                     .body(Body::empty())
                     .unwrap(),
