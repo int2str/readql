@@ -40,24 +40,69 @@ pub fn write_escaped_field(out: &mut String, field: &str) {
     }
 }
 
+/// Reusable formatting buffers for CSV serialization across rows and columns.
+#[derive(Default)]
+pub struct CsvFormatter {
+    itoa_buffer: itoa::Buffer,
+    ryu_buffer: ryu::Buffer,
+}
+
+impl CsvFormatter {
+    /// Creates a new `CsvFormatter` with initialized `itoa` and `ryu` buffers.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            itoa_buffer: itoa::Buffer::new(),
+            ryu_buffer: ryu::Buffer::new(),
+        }
+    }
+
+    /// Formats and writes a SQLite column value into a CSV buffer reusing internal buffers.
+    #[inline]
+    pub fn write_value(&mut self, out: &mut String, value: ValueRef<'_>) {
+        match value {
+            ValueRef::Null => {}
+            ValueRef::Integer(i) => {
+                out.push_str(self.itoa_buffer.format(i));
+            }
+            ValueRef::Real(f) => {
+                out.push_str(self.ryu_buffer.format(f));
+            }
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => match std::str::from_utf8(bytes) {
+                Ok(text) => write_escaped_field(out, text),
+                Err(_) => {
+                    let text = String::from_utf8_lossy(bytes);
+                    write_escaped_field(out, &text);
+                }
+            },
+        }
+    }
+
+    /// Formats a full SQLite row into CSV with zero per-column closure overhead.
+    #[inline]
+    pub fn write_row(
+        &mut self,
+        out: &mut String,
+        row: &Row<'_>,
+        column_count: usize,
+    ) -> Result<(), Error> {
+        for i in 0..column_count {
+            if i > 0 {
+                out.push(',');
+            }
+            let value = row.get_ref(i)?;
+            self.write_value(out, value);
+        }
+        out.push_str("\r\n");
+        Ok(())
+    }
+}
+
 /// Formats and writes a SQLite column value into a CSV buffer without heap allocations.
 #[inline]
 pub fn write_value(out: &mut String, value: ValueRef<'_>) {
-    match value {
-        ValueRef::Null => {}
-        ValueRef::Integer(i) => {
-            let mut buffer = itoa::Buffer::new();
-            out.push_str(buffer.format(i));
-        }
-        ValueRef::Real(f) => {
-            let mut buffer = ryu::Buffer::new();
-            out.push_str(buffer.format(f));
-        }
-        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
-            let text = String::from_utf8_lossy(bytes);
-            write_escaped_field(out, &text);
-        }
-    }
+    let mut formatter = CsvFormatter::new();
+    formatter.write_value(out, value);
 }
 
 /// Writes a CSV header record from an iterator yielding column name string slices.
@@ -80,15 +125,8 @@ where
 /// Formats a full SQLite row into CSV with zero per-column closure overhead.
 #[inline]
 pub fn write_row(out: &mut String, row: &Row<'_>, column_count: usize) -> Result<(), Error> {
-    for i in 0..column_count {
-        if i > 0 {
-            out.push(',');
-        }
-        let value = row.get_ref(i)?;
-        write_value(out, value);
-    }
-    out.push_str("\r\n");
-    Ok(())
+    let mut formatter = CsvFormatter::new();
+    formatter.write_row(out, row, column_count)
 }
 
 #[cfg(test)]
@@ -132,8 +170,8 @@ mod tests {
         assert_eq!(out, "42");
 
         out.clear();
-        write_value(&mut out, ValueRef::Real(3.14159));
-        assert_eq!(out, "3.14159");
+        write_value(&mut out, ValueRef::Real(123.456));
+        assert_eq!(out, "123.456");
 
         out.clear();
         write_value(&mut out, ValueRef::Null);
@@ -142,5 +180,30 @@ mod tests {
         out.clear();
         write_value(&mut out, ValueRef::Text(b"hello, world"));
         assert_eq!(out, "\"hello, world\"");
+    }
+
+    #[test]
+    fn test_csv_formatter_reuse() {
+        let mut formatter = CsvFormatter::new();
+        let mut out = String::new();
+
+        formatter.write_value(&mut out, ValueRef::Integer(100));
+        assert_eq!(out, "100");
+
+        out.push(',');
+        formatter.write_value(&mut out, ValueRef::Real(456.789));
+        assert_eq!(out, "100,456.789");
+
+        out.push(',');
+        formatter.write_value(&mut out, ValueRef::Integer(-50));
+        assert_eq!(out, "100,456.789,-50");
+
+        out.push(',');
+        formatter.write_value(&mut out, ValueRef::Null);
+        assert_eq!(out, "100,456.789,-50,");
+
+        out.push(',');
+        formatter.write_value(&mut out, ValueRef::Text(b"sample,text"));
+        assert_eq!(out, "100,456.789,-50,,\"sample,text\"");
     }
 }

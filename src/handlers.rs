@@ -60,12 +60,9 @@ pub async fn root(
         return Err(AppError::BadRequest("Error: No SQL query provided\r\n"));
     }
 
-    let csv_data = db::query_as_csv(&db, sql).await?;
+    let body = db::query_as_csv_stream(&db, sql);
 
-    Ok((
-        [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
-        csv_data,
-    ))
+    Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], body))
 }
 
 #[cfg(test)]
@@ -101,5 +98,70 @@ mod tests {
     fn test_clean_query_empty_and_whitespace_only() {
         assert_eq!(clean_query(""), "");
         assert_eq!(clean_query("   \n\t\r\n   "), "");
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_stream() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let db = Connection::open_in_memory().await.unwrap();
+        db.call(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE products (id INTEGER, name TEXT);
+                 INSERT INTO products VALUES (10, 'widget');",
+            )
+        })
+        .await
+        .unwrap();
+
+        let app = create_router(db);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+*+FROM+products")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/csv; charset=utf-8"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(body_str, "id,name\r\n10,widget\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_empty_query() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let db = Connection::open_in_memory().await.unwrap();
+        let app = create_router(db);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
