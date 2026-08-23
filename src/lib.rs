@@ -23,6 +23,7 @@ pub mod csv;
 
 /// SQLite database connection setup and query execution.
 pub mod db;
+pub use db::ConnectionPool;
 
 /// Application error types and HTTP response conversions.
 pub mod error;

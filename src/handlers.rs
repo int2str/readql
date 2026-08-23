@@ -24,50 +24,56 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
 use serde::Deserialize;
-use tokio_rusqlite::Connection;
 
 use crate::AppError;
-use crate::db;
+use crate::db::{self, ConnectionPool};
 
 /// Query parameters extracted from the HTTP request URL.
 #[derive(Deserialize)]
-pub struct SqlParams {
+pub struct SqlParameters {
     /// The SQL query string to execute.
     pub sql: Option<String>,
 }
 
 /// Strips unnecessary line-breaks, tabs, duplicate spaces, and surrounding whitespace from a SQL query.
-pub fn clean_query(sql: &str) -> String {
-    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+pub fn clean_query(sql_query: &str) -> String {
+    sql_query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Creates the Axum router configured with the shared SQLite connection state.
-pub fn create_router(db: Connection) -> Router {
-    Router::new().route("/", get(root)).with_state(db)
+/// Creates the Axum router configured with the shared SQLite connection pool state.
+pub fn create_router(connection_pool: ConnectionPool) -> Router {
+    Router::new()
+        .route("/", get(root))
+        .with_state(connection_pool)
 }
 
 /// Handles HTTP `GET /` requests to execute SQL queries and stream CSV results.
 pub async fn root(
     ConnectInfo(client_address): ConnectInfo<SocketAddr>,
-    State(db): State<Connection>,
-    Query(params): Query<SqlParams>,
+    State(connection_pool): State<ConnectionPool>,
+    Query(parameters): Query<SqlParameters>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sql = clean_query(&params.sql.unwrap_or_default());
-    let client_ip = client_address.ip();
-    tracing::info!("{client_ip} | {sql}");
+    let sql_query = clean_query(&parameters.sql.unwrap_or_default());
+    let client_ip_address = client_address.ip();
+    tracing::info!("{client_ip_address} | {sql_query}");
 
-    if sql.is_empty() {
+    if sql_query.is_empty() {
         return Err(AppError::BadRequest("Error: No SQL query provided\r\n"));
     }
 
-    let body = db::query_as_csv_stream(&db, sql);
+    let connection = connection_pool.get_connection();
+    let response_body = db::query_as_csv_stream(&connection, sql_query);
 
-    Ok(([(header::CONTENT_TYPE, "text/csv; charset=utf-8")], body))
+    Ok((
+        [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+        response_body,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_rusqlite::Connection;
 
     #[test]
     fn test_clean_query_basic() {
@@ -106,19 +112,21 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let db = Connection::open_in_memory().await.unwrap();
-        db.call(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE products (id INTEGER, name TEXT);
-                 INSERT INTO products VALUES (10, 'widget');",
-            )
-        })
-        .await
-        .unwrap();
+        let connection = Connection::open_in_memory().await.unwrap();
+        connection
+            .call(|raw_connection| {
+                raw_connection.execute_batch(
+                    "CREATE TABLE products (id INTEGER, name TEXT);
+                     INSERT INTO products VALUES (10, 'widget');",
+                )
+            })
+            .await
+            .unwrap();
 
-        let app = create_router(db);
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
 
-        let response = app
+        let response = application
             .oneshot(
                 Request::builder()
                     .uri("/?sql=SELECT+*+FROM+products")
@@ -138,8 +146,8 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        let body_str = String::from_utf8(bytes.to_vec()).unwrap();
-        assert_eq!(body_str, "id,name\r\n10,widget\r\n");
+        let body_string = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(body_string, "id,name\r\n10,widget\r\n");
     }
 
     #[tokio::test]
@@ -148,10 +156,11 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let db = Connection::open_in_memory().await.unwrap();
-        let app = create_router(db);
+        let connection = Connection::open_in_memory().await.unwrap();
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
 
-        let response = app
+        let response = application
             .oneshot(
                 Request::builder()
                     .uri("/")

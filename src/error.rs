@@ -32,12 +32,12 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
-            AppError::Database(err) => {
-                tracing::error!("Database query error: {err}");
+            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            AppError::Database(error) => {
+                tracing::error!("Database query error: {error}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DB Query error: {err:?}\r\n"),
+                    format!("DB Query error: {error:?}\r\n"),
                 )
                     .into_response()
             }
@@ -46,7 +46,7 @@ impl IntoResponse for AppError {
 }
 
 impl From<tokio_rusqlite::Error> for AppError {
-    fn from(err: tokio_rusqlite::Error) -> Self {
-        AppError::Database(err)
+    fn from(error: tokio_rusqlite::Error) -> Self {
+        AppError::Database(error)
     }
 }

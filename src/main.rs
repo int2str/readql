@@ -19,15 +19,15 @@ use std::path::PathBuf;
 use clap::Parser;
 use tokio::net::TcpListener;
 
-use readql::db::open_file;
+use readql::db::open_pool;
 use readql::handlers::create_router;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "High-throughput read-only SQLite HTTP query server")]
 struct Args {
     /// Path to the SQLite database file
-    #[arg(value_name = "DB_PATH")]
-    db_path: PathBuf,
+    #[arg(value_name = "DATABASE_PATH")]
+    database_path: PathBuf,
 
     /// IP address to listen on
     #[arg(short = 'l', long = "listen", default_value = "0.0.0.0")]
@@ -36,18 +36,28 @@ struct Args {
     /// Port to listen on
     #[arg(short = 'p', long = "port", default_value_t = 8002)]
     port: u16,
+
+    /// Number of database connections in the connection pool (default: available CPU cores)
+    #[arg(short = 'c', long = "connections")]
+    connections: Option<usize>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let args = Args::parse();
+    let arguments = Args::parse();
+    let pool_size = arguments.connections.unwrap_or(0);
 
-    let db = open_file(&args.db_path).await?;
-    let router = create_router(db);
+    let connection_pool = open_pool(&arguments.database_path, pool_size).await?;
+    tracing::info!(
+        "Initialized SQLite connection pool with {} connections",
+        connection_pool.size()
+    );
 
-    let bind_address = SocketAddr::new(args.listen, args.port);
+    let router = create_router(connection_pool);
+
+    let bind_address = SocketAddr::new(arguments.listen, arguments.port);
     let listener = TcpListener::bind(bind_address).await?;
     tracing::info!("Listening on http://{bind_address}");
 
