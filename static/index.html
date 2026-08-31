@@ -721,9 +721,6 @@
               <button class="btn btn-secondary" onclick="exportData('csv')" title="Download query output as CSV">
                 ⬇ CSV
               </button>
-              <button class="btn btn-secondary" onclick="exportData('parquet')" title="Download query output as Parquet">
-                ⬇ Parquet
-              </button>
               <button class="btn btn-secondary" onclick="copySnippet('pandas')" title="Copy Python Pandas ingestion snippet">
                 📋 Pandas
               </button>
@@ -1189,7 +1186,37 @@
       window.open(`${apiUrl}/?sql=${encodeURIComponent(sql)}&format=${format}`, '_blank');
     }
 
-    function copySnippet(type) {
+    async function copyToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      // Fallback for non-secure contexts (e.g. HTTP access) or unsupported clipboard API
+      return new Promise((resolve, reject) => {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        textArea.setAttribute('readonly', '');
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+          const successful = document.execCommand('copy');
+          textArea.remove();
+          if (successful) {
+            resolve();
+          } else {
+            reject(new Error('execCommand copy failed'));
+          }
+        } catch (err) {
+          textArea.remove();
+          reject(err);
+        }
+      });
+    }
+
+    async function copySnippet(type) {
       const sql = editor.value.trim();
       let code = '';
       if (type === 'pandas') {
@@ -1198,12 +1225,17 @@
         code = `import io, requests, polars as pl\n\nresp = requests.get("${apiUrl}/?sql=${encodeURIComponent(sql)}&format=parquet")\ndf = pl.read_parquet(io.BytesIO(resp.content))`;
       }
 
-      navigator.clipboard.writeText(code).then(() => {
+      try {
+        await copyToClipboard(code);
         const statStatus = document.getElementById('stat-status');
-        const oldText = statStatus.innerText;
-        statStatus.innerText = `Copied ${type.toUpperCase()} snippet!`;
-        setTimeout(() => { statStatus.innerText = oldText; }, 2000);
-      });
+        if (statStatus) {
+          const oldText = statStatus.innerText;
+          statStatus.innerText = `Copied ${type.toUpperCase()} snippet!`;
+          setTimeout(() => { statStatus.innerText = oldText; }, 2000);
+        }
+      } catch (err) {
+        console.error('Failed to copy snippet: ', err);
+      }
     }
 
     // ================= DASHBOARD ENGINE =================
