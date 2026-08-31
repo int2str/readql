@@ -235,12 +235,6 @@ impl ServerMetrics {
             }
 
             let timestamp_str = format_time_hms(now_system);
-            let truncated_sql = if event.sql_query.len() > 120 {
-                format!("{}...", &event.sql_query[..117])
-            } else {
-                event.sql_query.to_string()
-            };
-
             queries.push_front(RecentQueryLog {
                 timestamp: timestamp_str,
                 client_ip: event.client_ip.to_string(),
@@ -248,7 +242,7 @@ impl ServerMetrics {
                 duration_ms: (duration_us as f64) / 1000.0,
                 bytes: event.bytes_sent,
                 status: event.status,
-                sql: truncated_sql,
+                sql: event.sql_query.to_string(),
             });
         }
     }

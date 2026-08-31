@@ -640,6 +640,20 @@
     .badge-fmt-c { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
     .badge-fmt-p { background: rgba(168, 85, 247, 0.2); color: var(--purple); }
 
+    .query-cell {
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+      color: var(--accent);
+      transition: color 0.15s ease, text-decoration 0.15s ease;
+    }
+
+    .query-cell:hover {
+      color: var(--accent-hover);
+      text-decoration: underline;
+    }
+
     /* Modal dialog */
     dialog {
       background: var(--bg-surface);
@@ -896,7 +910,7 @@
                   <th>Client</th>
                   <th>Fmt</th>
                   <th>Duration</th>
-                  <th>Rows</th>
+                  <th>Size</th>
                   <th>Query</th>
                 </tr>
               </thead>
@@ -1044,6 +1058,14 @@
       if (!val) return;
       editor.value = decodeURIComponent(val);
       historySelect.value = '';
+      executeQuery();
+    }
+
+    function loadAndRunQuery(sql) {
+      if (!sql) return;
+      editor.value = sql;
+      switchView('studio');
+      editor.focus();
       executeQuery();
     }
 
@@ -1309,7 +1331,7 @@
               <td><span class="badge-fmt ${fmtClass}">${fmtLabel}</span></td>
               <td>${q.duration_ms.toFixed(1)} ms</td>
               <td>${formatBytes(q.bytes)}</td>
-              <td style="max-width: 260px; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(q.sql)}">${escapeHtml(q.sql)}</td>
+              <td class="query-cell" data-sql="${encodeURIComponent(q.sql)}" title="${escapeHtml(q.sql)} (Click to copy &amp; run)">${escapeHtml(q.sql)}</td>
             </tr>
           `;
         }).join('');
@@ -1465,6 +1487,17 @@
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         executeQuery();
+      }
+    });
+
+    // Click on recent query to copy into editor and run
+    document.getElementById('dash-queries-tbody')?.addEventListener('click', (e) => {
+      const cell = e.target.closest('.query-cell');
+      if (cell) {
+        const sql = decodeURIComponent(cell.getAttribute('data-sql') || '');
+        if (sql) {
+          loadAndRunQuery(sql);
+        }
       }
     });
 
