@@ -22,6 +22,9 @@
 pub mod csv;
 pub use csv::CsvWriter;
 
+/// Parquet serialization, Arrow schema inference, and RecordBatch building.
+pub mod parquet_format;
+
 /// SQLite database connection setup and query execution.
 pub mod db;
 pub use db::ConnectionPool;

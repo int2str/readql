@@ -20,7 +20,7 @@
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::header;
+use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
 use serde::Deserialize;
@@ -28,11 +28,33 @@ use serde::Deserialize;
 use crate::AppError;
 use crate::db::{self, ConnectionPool};
 
+/// Supported query output formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// RFC 4180 CSV text format.
+    #[default]
+    Csv,
+    /// Apache Parquet binary columnar format.
+    Parquet,
+}
+
+impl OutputFormat {
+    /// Returns the HTTP `Content-Type` corresponding to the output format.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            OutputFormat::Csv => "text/csv; charset=utf-8",
+            OutputFormat::Parquet => "application/vnd.apache.parquet",
+        }
+    }
+}
+
 /// Query parameters extracted from the HTTP request URL.
 #[derive(Deserialize)]
 pub struct SqlParameters {
     /// The SQL query string to execute.
     pub sql: Option<String>,
+    /// Optional response output format (`csv` or `parquet`).
+    pub format: Option<String>,
 }
 
 /// Formats a SQL query as a single line for structured logging without mutating the underlying SQL query.
@@ -47,10 +69,11 @@ pub fn create_router(connection_pool: ConnectionPool) -> Router {
         .with_state(connection_pool)
 }
 
-/// Handles HTTP `GET /` requests to execute SQL queries and stream CSV results.
+/// Handles HTTP `GET /` requests to execute SQL queries and stream CSV or Parquet results.
 pub async fn root(
     ConnectInfo(client_address): ConnectInfo<SocketAddr>,
     State(connection_pool): State<ConnectionPool>,
+    headers: HeaderMap,
     Query(parameters): Query<SqlParameters>,
 ) -> Result<impl IntoResponse, AppError> {
     let raw_sql_query = parameters.sql.unwrap_or_default();
@@ -62,15 +85,43 @@ pub async fn root(
         ));
     }
 
+    let output_format = match parameters.format.as_deref() {
+        None => {
+            if let Some(accept) = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok()) {
+                if accept.contains("application/vnd.apache.parquet") || accept.contains("parquet") {
+                    OutputFormat::Parquet
+                } else {
+                    OutputFormat::Csv
+                }
+            } else {
+                OutputFormat::Csv
+            }
+        }
+        Some(fmt) if fmt.eq_ignore_ascii_case("csv") => OutputFormat::Csv,
+        Some(fmt) if fmt.eq_ignore_ascii_case("parquet") || fmt.eq_ignore_ascii_case("pq") => {
+            OutputFormat::Parquet
+        }
+        Some(invalid) => {
+            return Err(AppError::BadRequest(format!(
+                "Error: Unsupported format '{invalid}'. Supported formats are 'csv' and 'parquet'.\r\n"
+            )));
+        }
+    };
+
     let client_ip_address = client_address.ip();
     let single_line_query_log = format_query_for_logging(sql_query);
     tracing::info!("{client_ip_address} | {single_line_query_log}");
 
     let connection = connection_pool.get_connection();
-    let response_body = db::query_as_csv_stream(&connection, sql_query.to_string()).await?;
+    let response_body = match output_format {
+        OutputFormat::Csv => db::query_as_csv_stream(&connection, sql_query.to_string()).await?,
+        OutputFormat::Parquet => {
+            db::query_as_parquet_stream(&connection, sql_query.to_string()).await?
+        }
+    };
 
     Ok((
-        [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+        [(header::CONTENT_TYPE, output_format.content_type())],
         response_body,
     ))
 }
@@ -205,6 +256,125 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_parquet_format() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use bytes::Bytes;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        connection
+            .call(|raw_connection| {
+                raw_connection.execute_batch(
+                    "CREATE TABLE items (id INTEGER, name TEXT, price REAL);
+                     INSERT INTO items VALUES (1, 'item1', 10.5);",
+                )
+            })
+            .await
+            .unwrap();
+
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+*+FROM+items&format=parquet")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/vnd.apache.parquet"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[0..4], b"PAR1");
+
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
+        let mut reader = reader_builder.build().unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_parquet_accept_header() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        connection
+            .call(|raw_connection| {
+                raw_connection.execute_batch(
+                    "CREATE TABLE items (id INTEGER, name TEXT);
+                     INSERT INTO items VALUES (1, 'item1');",
+                )
+            })
+            .await
+            .unwrap();
+
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+*+FROM+items")
+                    .header("Accept", "application/vnd.apache.parquet")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/vnd.apache.parquet"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[0..4], b"PAR1");
+    }
+
+    #[tokio::test]
+    async fn test_root_handler_unsupported_format() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let application = create_router(connection_pool);
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+1&format=json")
                     .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
                     .body(Body::empty())
                     .unwrap(),

@@ -8,6 +8,7 @@ This project was inspired by the wonderful [Datasette](https://datasette.io/) pr
 
 - **High Throughput & Low Latency:** Optimized SQLite read configuration with `mmap`, `cache_size`, and in-memory temporary storage.
 - **Zero-Copy CSV Streaming:** Uses `ValueRef` column inspection to eliminate intermediate allocations while formatting results directly to RFC 4180 CSV.
+- **Apache Parquet Streaming:** High-performance binary columnar format with Zstandard compression for data science tools like Pandas, Polars, and DuckDB.
 - **Asynchronous Architecture:** Built on Axum and Tokio for high concurrency.
 
 ## Prerequisites
@@ -58,20 +59,45 @@ readql --help
 
 ### `GET /`
 
-Executes a SQL read query provided in the `sql` query parameter and returns RFC 4180 CSV data.
+Executes a SQL read query provided in the `sql` query parameter and returns RFC 4180 CSV or Apache Parquet data.
 
-#### Example Request
+#### Query Parameters
+
+| Parameter | Type | Description | Default |
+| :--- | :--- | :--- | :--- |
+| `sql` | `string` | The SQL query to execute *(Required)* | |
+| `format` | `string` | Output format: `csv` or `parquet` (or `pq`) | `csv` (or inferred from `Accept` header) |
+
+#### CSV Example Request
 
 ```bash
 curl -G "http://localhost:8002/" --data-urlencode "sql=SELECT * FROM temperatures LIMIT 10"
 ```
 
-#### Example Response
+#### CSV Response
 
 ```csv
 id,timestamp,reference,t1_single,t1_average,t2_single,t2_average,t3_single,t3_average
 1,1700000000,21.5,21.4,21.45,21.6,21.55,21.3,21.35
 2,1700000001,21.5,21.4,21.45,21.6,21.55,21.3,21.35
+```
+
+#### Parquet Example Request (Pandas / Polars)
+
+```python
+import io, requests, pandas as pd
+
+# Query as Parquet via ?format=parquet
+resp = requests.get("http://localhost:8002/?sql=SELECT+*+FROM+temperatures&format=parquet")
+df = pd.read_parquet(io.BytesIO(resp.content))
+```
+
+```python
+import io, requests, polars as pl
+
+# Query as Parquet in Polars
+resp = requests.get("http://localhost:8002/?sql=SELECT+*+FROM+temperatures&format=parquet")
+df = pl.read_parquet(io.BytesIO(resp.content))
 ```
 
 ## Development & Testing
@@ -86,8 +112,14 @@ cargo fmt --check
 # Run linter
 cargo clippy -- -D warnings
 
-# Run benchmark suite
-python3 benchmark.py --url "http://localhost:8002?sql=SELECT+*+FROM+temperatures+LIMIT+1000"
+# Generate demo database
+python3 scripts/generate_demo_database.py demo.db --count 1000000
+
+# Run CSV vs Parquet import benchmark
+python3 scripts/benchmark_csv_vs_parquet.py --host localhost --limit 1000000
+
+# Run concurrent throughput benchmark
+python3 scripts/benchmark_throughput.py --host localhost --threads 10 --requests 100
 ```
 
 ## License
