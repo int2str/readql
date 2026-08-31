@@ -44,7 +44,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::uptime())
+        .with_target(false)
+        .init();
 
     let arguments = Args::parse();
     let pool_size = arguments.connections.unwrap_or(0);
