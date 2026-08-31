@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ReadQL Studio</title>
+  <title>ReadQL Studio & Dashboard</title>
   <meta name="readql-api-port" content="{{API_PORT}}">
   <style>
     :root {
@@ -18,7 +18,9 @@
       --text-muted: #94a3b8;
       --border: #2e3d56;
       --success: #34d399;
+      --warning: #fbbf24;
       --error: #f87171;
+      --purple: #a855f7;
       --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     }
@@ -43,11 +45,18 @@
     header {
       background: var(--bg-surface);
       border-bottom: 1px solid var(--border);
-      padding: 0.6rem 1.25rem;
+      padding: 0.5rem 1.25rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      height: 48px;
+      height: 50px;
+      z-index: 100;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
     }
 
     .brand {
@@ -67,6 +76,42 @@
       padding: 2px 6px;
       border-radius: 4px;
       text-transform: uppercase;
+    }
+
+    /* Navigation Tabs */
+    .nav-tabs {
+      display: flex;
+      align-items: center;
+      background: var(--bg-darker);
+      padding: 3px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      gap: 2px;
+    }
+
+    .nav-tab {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.8rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: transparent;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .nav-tab:hover {
+      color: var(--text-main);
+    }
+
+    .nav-tab.active {
+      background: var(--bg-surface);
+      color: var(--accent);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     }
 
     .header-controls {
@@ -100,8 +145,16 @@
       box-shadow: 0 0 6px var(--error);
     }
 
-    /* Layout */
-    .layout {
+    /* View containers */
+    .view-container {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ================= QUERY STUDIO VIEW ================= */
+    .layout-studio {
       display: flex;
       flex: 1;
       overflow: hidden;
@@ -159,7 +212,7 @@
       font-size: 0.9rem;
     }
 
-    /* Main Content */
+    /* Main Studio Content */
     .main-pane {
       flex: 1;
       display: flex;
@@ -168,7 +221,6 @@
       background: var(--bg-primary);
     }
 
-    /* Editor Section */
     .editor-section {
       background: var(--bg-surface);
       border-bottom: 1px solid var(--border);
@@ -178,13 +230,9 @@
       gap: 0.5rem;
     }
 
-    .editor-container {
-      position: relative;
-    }
-
     textarea#sql-editor {
       width: 100%;
-      height: 100px;
+      height: 95px;
       background: var(--bg-darker);
       color: #e0f2fe;
       font-family: var(--font-mono);
@@ -257,7 +305,6 @@
       margin-left: 0.25rem;
     }
 
-    /* History select */
     select#query-history {
       background: var(--bg-darker);
       color: var(--text-muted);
@@ -274,7 +321,6 @@
       border-color: var(--accent);
     }
 
-    /* Status & Stats Bar */
     .stats-bar {
       padding: 0.4rem 1rem;
       background: #0c1322;
@@ -296,7 +342,6 @@
       font-weight: 600;
     }
 
-    /* Results Table Container */
     .results-container {
       flex: 1;
       overflow: auto;
@@ -370,6 +415,231 @@
       text-align: right;
     }
 
+    /* ================= DASHBOARD VIEW ================= */
+    .layout-dashboard {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      background: var(--bg-primary);
+    }
+
+    /* Top KPI Cards Grid */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 1rem;
+    }
+
+    .kpi-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 0.5rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .kpi-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .kpi-value {
+      font-size: 1.65rem;
+      font-weight: 700;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      letter-spacing: -0.03em;
+    }
+
+    .kpi-sub {
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .pill {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .pill-success { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+    .pill-accent { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+    .pill-purple { background: rgba(168, 85, 247, 0.15); color: var(--purple); }
+
+    /* Pulse animation for live in-flight */
+    .pulse-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 0 rgba(52, 211, 153, 0.4);
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
+      70% { box-shadow: 0 0 0 8px rgba(52, 211, 153, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+    }
+
+    /* Charts Section */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+      gap: 1rem;
+    }
+
+    .chart-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .chart-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .chart-meta {
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .canvas-container {
+      position: relative;
+      width: 100%;
+      height: 140px;
+    }
+
+    canvas.metric-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      border-radius: 4px;
+      background: var(--bg-darker);
+    }
+
+    /* Tables Grid Section */
+    .dashboard-tables-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    @media (max-width: 1024px) {
+      .dashboard-tables-grid {
+        grid-template-columns: 1fr;
+      }
+      .charts-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .dash-panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      max-height: 340px;
+    }
+
+    .dash-panel-header {
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #182234;
+    }
+
+    .dash-panel-body {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    table.dash-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+    }
+
+    table.dash-table th {
+      background: var(--bg-darker);
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      border-bottom: 1px solid var(--border);
+    }
+
+    table.dash-table td {
+      padding: 0.45rem 0.75rem;
+      border-bottom: 1px solid rgba(46, 61, 86, 0.4);
+      color: var(--text-main);
+      white-space: nowrap;
+    }
+
+    table.dash-table tr:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .badge-fmt {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+
+    .badge-fmt-c { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+    .badge-fmt-p { background: rgba(168, 85, 247, 0.2); color: var(--purple); }
+
     /* Modal dialog */
     dialog {
       background: var(--bg-surface);
@@ -386,27 +656,27 @@
       background: rgba(0, 0, 0, 0.7);
       backdrop-filter: blur(2px);
     }
-
-    dialog pre {
-      background: var(--bg-darker);
-      padding: 0.75rem;
-      border-radius: 4px;
-      font-family: var(--font-mono);
-      font-size: 0.8rem;
-      overflow-x: auto;
-      margin: 0.75rem 0;
-      border: 1px solid var(--border);
-    }
   </style>
 </head>
 <body>
 
   <!-- Top Navigation Header -->
   <header>
-    <div class="brand">
-      <span>⚡ ReadQL</span>
-      <span class="brand-badge">Studio</span>
+    <div class="header-left">
+      <div class="brand">
+        <span>⚡ ReadQL</span>
+        <span class="brand-badge">Studio</span>
+      </div>
+      <div class="nav-tabs">
+        <button id="tab-studio" class="nav-tab active" onclick="switchView('studio')">
+          <span>📄</span> Query Studio
+        </button>
+        <button id="tab-dashboard" class="nav-tab" onclick="switchView('dashboard')">
+          <span>📊</span> Live Dashboard
+        </button>
+      </div>
     </div>
+
     <div class="header-controls">
       <div class="api-status">
         <span id="status-indicator" class="status-dot"></span>
@@ -416,68 +686,224 @@
     </div>
   </header>
 
-  <!-- Main Workspace -->
-  <div class="layout">
-    <!-- Sidebar: Tables Explorer -->
-    <aside class="sidebar">
-      <div class="sidebar-header">
-        <span>Tables</span>
-        <button class="btn btn-secondary" style="padding: 2px 6px; font-size: 0.7rem;" onclick="loadTables()" title="Refresh tables">↻</button>
-      </div>
-      <div id="table-list" class="sidebar-content">
-        <div style="padding: 0.5rem; color: var(--text-muted); font-size: 0.8rem;">Loading tables...</div>
-      </div>
-    </aside>
-
-    <!-- Main Workspace Content -->
-    <main class="main-pane">
-      <!-- Editor & Action Toolbar -->
-      <section class="editor-section">
-        <div class="editor-container">
-          <textarea id="sql-editor" spellcheck="false" placeholder="SELECT * FROM temperatures LIMIT 100">SELECT * FROM temperatures LIMIT 100</textarea>
+  <!-- View 1: Query Studio -->
+  <div id="view-studio" class="view-container">
+    <div class="layout-studio">
+      <!-- Sidebar: Tables Explorer -->
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <span>Tables</span>
+          <button class="btn btn-secondary" style="padding: 2px 6px; font-size: 0.7rem;" onclick="loadTables()" title="Refresh tables">↻</button>
         </div>
-        <div class="editor-toolbar">
-          <div class="toolbar-left">
-            <button class="btn btn-primary" id="run-btn" onclick="executeQuery()">
-              ▶ Run Query
-            </button>
-            <span class="shortcut-hint">(Ctrl+Enter)</span>
-            <select id="query-history" onchange="loadFromHistory(this.value)">
-              <option value="">History</option>
-            </select>
+        <div id="table-list" class="sidebar-content">
+          <div style="padding: 0.5rem; color: var(--text-muted); font-size: 0.8rem;">Loading tables...</div>
+        </div>
+      </aside>
+
+      <!-- Main Workspace Content -->
+      <main class="main-pane">
+        <!-- Editor & Action Toolbar -->
+        <section class="editor-section">
+          <div class="editor-container">
+            <textarea id="sql-editor" spellcheck="false" placeholder="SELECT * FROM temperatures LIMIT 100">SELECT * FROM temperatures LIMIT 100</textarea>
           </div>
-          <div class="toolbar-right">
-            <button class="btn btn-secondary" onclick="exportData('csv')" title="Download query output as CSV">
-              ⬇ CSV
-            </button>
-            <button class="btn btn-secondary" onclick="copySnippet('pandas')" title="Copy Python Pandas ingestion snippet">
-              📋 Pandas
-            </button>
-            <button class="btn btn-secondary" onclick="copySnippet('polars')" title="Copy Python Polars ingestion snippet">
-              📋 Polars
-            </button>
+          <div class="editor-toolbar">
+            <div class="toolbar-left">
+              <button class="btn btn-primary" id="run-btn" onclick="executeQuery()">
+                ▶ Run Query
+              </button>
+              <span class="shortcut-hint">(Ctrl+Enter)</span>
+              <select id="query-history" onchange="loadFromHistory(this.value)">
+                <option value="">History</option>
+              </select>
+            </div>
+            <div class="toolbar-right">
+              <button class="btn btn-secondary" onclick="exportData('csv')" title="Download query output as CSV">
+                ⬇ CSV
+              </button>
+              <button class="btn btn-secondary" onclick="exportData('parquet')" title="Download query output as Parquet">
+                ⬇ Parquet
+              </button>
+              <button class="btn btn-secondary" onclick="copySnippet('pandas')" title="Copy Python Pandas ingestion snippet">
+                📋 Pandas
+              </button>
+              <button class="btn btn-secondary" onclick="copySnippet('polars')" title="Copy Python Polars ingestion snippet">
+                📋 Polars
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Stats Bar -->
+        <div class="stats-bar">
+          <div class="stats-metrics">
+            <div>Status: <span id="stat-status" class="stat-badge">Ready</span></div>
+            <div>Rows: <span id="stat-rows" class="stat-badge">-</span></div>
+            <div>Duration: <span id="stat-duration" class="stat-badge">-</span></div>
+            <div>Size: <span id="stat-size" class="stat-badge">-</span></div>
+          </div>
+          <div id="stat-timestamp" style="font-size: 0.72rem;"></div>
+        </div>
+
+        <!-- Results Grid -->
+        <div class="results-container" id="results-area">
+          <div class="empty-state">
+            <span>Press <strong>Run Query</strong> or hit <strong>Ctrl + Enter</strong> to execute.</span>
           </div>
         </div>
-      </section>
+      </main>
+    </div>
+  </div>
 
-      <!-- Stats Bar -->
-      <div class="stats-bar">
-        <div class="stats-metrics">
-          <div>Status: <span id="stat-status" class="stat-badge">Ready</span></div>
-          <div>Rows: <span id="stat-rows" class="stat-badge">-</span></div>
-          <div>Duration: <span id="stat-duration" class="stat-badge">-</span></div>
-          <div>Size: <span id="stat-size" class="stat-badge">-</span></div>
+  <!-- View 2: Live Dashboard -->
+  <div id="view-dashboard" class="view-container" style="display: none;">
+    <div class="layout-dashboard">
+      
+      <!-- Top Metric Cards -->
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Total Requests</span>
+            <span id="kpi-success-rate" class="pill pill-success">100% OK</span>
+          </div>
+          <div class="kpi-value" id="kpi-total-reqs">0</div>
+          <div class="kpi-sub">
+            <span>Rate:</span>
+            <strong id="kpi-current-rps" style="color: var(--accent);">0.0 req/s</strong>
+          </div>
         </div>
-        <div id="stat-timestamp" style="font-size: 0.72rem;"></div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Total Rows Sent</span>
+            <span class="pill pill-accent">Streamed</span>
+          </div>
+          <div class="kpi-value" id="kpi-total-rows">0</div>
+          <div class="kpi-sub">
+            <span>Throughput:</span>
+            <strong id="kpi-current-rows-s" style="color: var(--accent);">0 rows/s</strong>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Data Transferred</span>
+            <span id="kpi-fmt-ratio" class="pill pill-purple">Parquet / CSV</span>
+          </div>
+          <div class="kpi-value" id="kpi-total-bytes">0 B</div>
+          <div class="kpi-sub">
+            <span>Transfer Rate:</span>
+            <strong id="kpi-current-bytes-s" style="color: var(--accent);">0 B/s</strong>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Average Latency</span>
+            <span class="pill pill-accent">Query Time</span>
+          </div>
+          <div class="kpi-value" id="kpi-avg-latency">0.0 ms</div>
+          <div class="kpi-sub">
+            <span>Server Uptime:</span>
+            <strong id="kpi-uptime">-</strong>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Active In-Flight</span>
+            <span class="pulse-dot"></span>
+          </div>
+          <div class="kpi-value" id="kpi-active-reqs" style="color: var(--success);">0</div>
+          <div class="kpi-sub">
+            <span>Concurrent Queries</span>
+          </div>
+        </div>
       </div>
 
-      <!-- Results Grid -->
-      <div class="results-container" id="results-area">
-        <div class="empty-state">
-          <span>Press <strong>Run Query</strong> or hit <strong>Ctrl + Enter</strong> to execute.</span>
+      <!-- Real-Time Charts -->
+      <div class="charts-grid">
+        <!-- Request Throughput Chart -->
+        <div class="chart-card">
+          <div class="chart-header">
+            <div class="chart-title">
+              <span>⚡</span> Request Throughput (Req/s - Last 60s)
+            </div>
+            <div class="chart-meta" id="chart-rps-meta">0.0 req/s</div>
+          </div>
+          <div class="canvas-container">
+            <canvas id="canvas-rps" class="metric-canvas"></canvas>
+          </div>
+        </div>
+
+        <!-- Transfer Rate & Rows Chart -->
+        <div class="chart-card">
+          <div class="chart-header">
+            <div class="chart-title">
+              <span>📦</span> Data Transfer Rate (MB/s - Last 60s)
+            </div>
+            <div class="chart-meta" id="chart-bytes-meta">0.0 MB/s</div>
+          </div>
+          <div class="canvas-container">
+            <canvas id="canvas-bytes" class="metric-canvas"></canvas>
+          </div>
         </div>
       </div>
-    </main>
+
+      <!-- Tables Grid: Active Clients & Recent Queries -->
+      <div class="dashboard-tables-grid">
+        <!-- Active Client Hosts -->
+        <div class="dash-panel">
+          <div class="dash-panel-header">
+            <span>Active Client Hosts</span>
+            <span id="dash-client-count" style="font-size: 0.72rem; color: var(--text-muted);">0 Hosts</span>
+          </div>
+          <div class="dash-panel-body">
+            <table class="dash-table">
+              <thead>
+                <tr>
+                  <th>Client IP</th>
+                  <th>Requests</th>
+                  <th>Rows Streamed</th>
+                  <th>Data Volume</th>
+                  <th>Avg Latency</th>
+                  <th>Last Active</th>
+                </tr>
+              </thead>
+              <tbody id="dash-clients-tbody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No client traffic recorded yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Recent Queries Log -->
+        <div class="dash-panel">
+          <div class="dash-panel-header">
+            <span>Recent Queries Log</span>
+            <span style="font-size: 0.72rem; color: var(--text-muted);">Latest 30</span>
+          </div>
+          <div class="dash-panel-body">
+            <table class="dash-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Client</th>
+                  <th>Fmt</th>
+                  <th>Duration</th>
+                  <th>Rows</th>
+                  <th>Query</th>
+                </tr>
+              </thead>
+              <tbody id="dash-queries-tbody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No recent queries</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
   </div>
 
   <!-- Settings Dialog -->
@@ -498,6 +924,9 @@
     const defaultApiUrl = `${window.location.protocol}//${window.location.hostname}:${metaPort}`;
     let apiUrl = localStorage.getItem('readql_api_url') || defaultApiUrl;
 
+    let currentView = 'studio';
+    let metricsPollInterval = null;
+
     const editor = document.getElementById('sql-editor');
     const resultsArea = document.getElementById('results-area');
     const historySelect = document.getElementById('query-history');
@@ -511,12 +940,45 @@
       apiLabel.innerText = apiUrl.replace(/^https?:\/\//, '');
     }
 
+    function switchView(viewName) {
+      currentView = viewName;
+      document.getElementById('tab-studio').className = `nav-tab ${viewName === 'studio' ? 'active' : ''}`;
+      document.getElementById('tab-dashboard').className = `nav-tab ${viewName === 'dashboard' ? 'active' : ''}`;
+
+      document.getElementById('view-studio').style.display = viewName === 'studio' ? 'flex' : 'none';
+      document.getElementById('view-dashboard').style.display = viewName === 'dashboard' ? 'flex' : 'none';
+
+      if (viewName === 'dashboard') {
+        fetchMetrics();
+        if (!metricsPollInterval) {
+          metricsPollInterval = setInterval(fetchMetrics, 1000);
+        }
+      } else {
+        if (metricsPollInterval) {
+          clearInterval(metricsPollInterval);
+          metricsPollInterval = null;
+        }
+      }
+    }
+
     function formatBytes(bytes) {
-      if (bytes === 0) return '0 B';
+      if (!bytes || bytes <= 0) return '0 B';
       const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
       const i = Math.floor(Math.log(bytes) / Math.log(k));
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function formatUptime(seconds) {
+      if (!seconds) return '0s';
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      if (d > 0) return `${d}d ${h}h`;
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
     }
 
     async function checkHealth() {
@@ -734,6 +1196,207 @@
         statStatus.innerText = `Copied ${type.toUpperCase()} snippet!`;
         setTimeout(() => { statStatus.innerText = oldText; }, 2000);
       });
+    }
+
+    // ================= DASHBOARD ENGINE =================
+    async function fetchMetrics() {
+      try {
+        const res = await fetch(`${apiUrl}/api/metrics`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderDashboard(data);
+      } catch (e) {}
+    }
+
+    function renderDashboard(data) {
+      // 1. KPI Cards
+      document.getElementById('kpi-total-reqs').innerText = data.total_requests.toLocaleString();
+      const successPct = data.total_requests > 0 
+        ? ((data.successful_requests / data.total_requests) * 100).toFixed(1) + '% OK'
+        : '100% OK';
+      document.getElementById('kpi-success-rate').innerText = successPct;
+      document.getElementById('kpi-current-rps').innerText = `${data.current_rps.toFixed(1)} req/s`;
+
+      document.getElementById('kpi-total-rows').innerText = data.total_rows_streamed.toLocaleString();
+      document.getElementById('kpi-current-rows-s').innerText = `${Math.round(data.current_rows_per_sec).toLocaleString()} rows/s`;
+
+      document.getElementById('kpi-total-bytes').innerText = formatBytes(data.total_bytes);
+      document.getElementById('kpi-current-bytes-s').innerText = `${formatBytes(data.current_bytes_per_sec)}/s`;
+
+      document.getElementById('kpi-avg-latency').innerText = `${data.avg_latency_ms.toFixed(1)} ms`;
+      document.getElementById('kpi-uptime').innerText = formatUptime(data.uptime_seconds);
+      document.getElementById('kpi-active-reqs').innerText = data.active_requests;
+
+      // 2. Render Canvas Graphs
+      const history = data.throughput_history_60s || [];
+      renderThroughputChart(history, data.current_rps);
+      renderBandwidthChart(history, data.current_bytes_per_sec);
+
+      // 3. Render Clients Table
+      const clientsTbody = document.getElementById('dash-clients-tbody');
+      const clients = data.clients || [];
+      document.getElementById('dash-client-count').innerText = `${clients.length} Host${clients.length === 1 ? '' : 's'}`;
+
+      if (clients.length === 0) {
+        clientsTbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No client traffic recorded yet</td></tr>';
+      } else {
+        clientsTbody.innerHTML = clients.map(c => `
+          <tr>
+            <td><strong style="color: var(--accent);">${escapeHtml(c.ip)}</strong></td>
+            <td>${c.requests.toLocaleString()}</td>
+            <td>${c.rows.toLocaleString()}</td>
+            <td>${formatBytes(c.bytes)}</td>
+            <td>${c.avg_latency_ms.toFixed(1)} ms</td>
+            <td style="color: var(--text-muted);">${formatAgo(c.last_seen_ms_ago)}</td>
+          </tr>
+        `).join('');
+      }
+
+      // 4. Render Recent Queries
+      const queriesTbody = document.getElementById('dash-queries-tbody');
+      const queries = data.recent_queries || [];
+      if (queries.length === 0) {
+        queriesTbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No recent queries</td></tr>';
+      } else {
+        queriesTbody.innerHTML = queries.map(q => {
+          const isParquet = q.format === 'P';
+          const fmtClass = isParquet ? 'badge-fmt-p' : 'badge-fmt-c';
+          const fmtLabel = isParquet ? 'PARQUET' : 'CSV';
+          return `
+            <tr>
+              <td style="color: var(--text-muted);">${escapeHtml(q.timestamp)}</td>
+              <td>${escapeHtml(q.client_ip)}</td>
+              <td><span class="badge-fmt ${fmtClass}">${fmtLabel}</span></td>
+              <td>${q.duration_ms.toFixed(1)} ms</td>
+              <td>${formatBytes(q.bytes)}</td>
+              <td style="max-width: 260px; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(q.sql)}">${escapeHtml(q.sql)}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    function formatAgo(ms) {
+      if (!ms || ms < 1000) return 'Just now';
+      const sec = Math.floor(ms / 1000);
+      if (sec < 60) return `${sec}s ago`;
+      const min = Math.floor(sec / 60);
+      return `${min}m ago`;
+    }
+
+    // Zero-dependency HTML5 Canvas rendering for smooth time-series graphs
+    function drawLineChart(canvasId, values, colorPrimary, colorGlow, maxValOverride) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+      }
+
+      const ctx = canvas.getContext('2d');
+      ctx.save();
+      ctx.scale(dpr, dpr);
+
+      const width = rect.width;
+      const height = rect.height;
+
+      ctx.clearRect(0, 0, width, height);
+
+      // Grid background lines
+      ctx.strokeStyle = 'rgba(46, 61, 86, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let y = 0.25; y <= 0.75; y += 0.25) {
+        ctx.moveTo(0, height * y);
+        ctx.lineTo(width, height * y);
+      }
+      ctx.stroke();
+
+      if (!values || values.length < 2) {
+        ctx.restore();
+        return;
+      }
+
+      const maxVal = maxValOverride || Math.max(...values, 1);
+      const stepX = width / (values.length - 1);
+
+      // Gradient Fill Path
+      const gradient = ctx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, colorGlow);
+      gradient.addColorStop(1, 'rgba(15, 23, 42, 0)');
+
+      ctx.beginPath();
+      ctx.moveTo(0, height);
+
+      for (let i = 0; i < values.length; i++) {
+        const x = i * stepX;
+        const norm = Math.min(1, Math.max(0, values[i] / maxVal));
+        const y = height - (norm * (height - 15) + 5);
+        if (i === 0) {
+          ctx.lineTo(x, y);
+        } else {
+          const prevX = (i - 1) * stepX;
+          const prevNorm = Math.min(1, Math.max(0, values[i - 1] / maxVal));
+          const prevY = height - (prevNorm * (height - 15) + 5);
+          const cpX = (prevX + x) / 2;
+          ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
+        }
+      }
+
+      ctx.lineTo(width, height);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Stroke Line Path
+      ctx.beginPath();
+      for (let i = 0; i < values.length; i++) {
+        const x = i * stepX;
+        const norm = Math.min(1, Math.max(0, values[i] / maxVal));
+        const y = height - (norm * (height - 15) + 5);
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          const prevX = (i - 1) * stepX;
+          const prevNorm = Math.min(1, Math.max(0, values[i - 1] / maxVal));
+          const prevY = height - (prevNorm * (height - 15) + 5);
+          const cpX = (prevX + x) / 2;
+          ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
+        }
+      }
+
+      ctx.strokeStyle = colorPrimary;
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke();
+
+      // Current Value Pill / Dot at end
+      const lastVal = values[values.length - 1];
+      const lastNorm = Math.min(1, Math.max(0, lastVal / maxVal));
+      const lastY = height - (lastNorm * (height - 15) + 5);
+
+      ctx.fillStyle = colorPrimary;
+      ctx.beginPath();
+      ctx.arc(width - 2, lastY, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function renderThroughputChart(history, currentRps) {
+      document.getElementById('chart-rps-meta').innerText = `${currentRps.toFixed(1)} req/s`;
+      const reqs = history.map(p => p.requests);
+      drawLineChart('canvas-rps', reqs, '#38bdf8', 'rgba(56, 189, 248, 0.25)');
+    }
+
+    function renderBandwidthChart(history, currentBytesSec) {
+      document.getElementById('chart-bytes-meta').innerText = `${formatBytes(currentBytesSec)}/s`;
+      const mbs = history.map(p => p.bytes / (1024 * 1024));
+      drawLineChart('canvas-bytes', mbs, '#a855f7', 'rgba(168, 85, 247, 0.25)');
     }
 
     function openSettingsDialog() {

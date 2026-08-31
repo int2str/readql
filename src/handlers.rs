@@ -17,16 +17,26 @@
 //! Axum HTTP routes and request handlers for executing queries.
 //!
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
+use std::time::Instant;
 
+use axum::Json;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
+use bytes::Bytes;
 use serde::Deserialize;
+use tokio_stream::Stream;
+use tower_http::cors::CorsLayer;
 
 use crate::AppError;
 use crate::db::{self, ConnectionPool};
+use crate::metrics::{RequestEvent, ServerMetrics};
 
 /// Supported query output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,27 +80,120 @@ pub fn format_query_for_logging(sql_query: &str) -> String {
     sql_query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-use tower_http::cors::CorsLayer;
+/// Shared application state across HTTP routes.
+#[derive(Clone)]
+pub struct AppState {
+    pub connection_pool: ConnectionPool,
+    pub metrics: Arc<ServerMetrics>,
+}
 
-/// Creates the Axum router configured with the shared SQLite connection pool state.
-pub fn create_router(connection_pool: ConnectionPool) -> Router {
+/// Stream wrapper that tracks bytes transferred and records request metrics on finish or drop.
+pub struct MetricTrackingStream<S> {
+    inner: S,
+    metrics: Arc<ServerMetrics>,
+    client_ip: IpAddr,
+    format_indicator: &'static str,
+    sql_query: String,
+    start_time: Instant,
+    row_counter: Arc<AtomicU64>,
+    bytes_sent: u64,
+    status: u16,
+    finished: bool,
+}
+
+impl<S, E> Stream for MetricTrackingStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                self.bytes_sent += chunk.len() as u64;
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                self.status = 500;
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Ready(None) => {
+                self.finish_tracking();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> MetricTrackingStream<S> {
+    fn finish_tracking(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            let rows = self.row_counter.load(Ordering::Relaxed);
+            self.metrics.record_request(RequestEvent {
+                client_ip: self.client_ip,
+                format_indicator: self.format_indicator,
+                duration: self.start_time.elapsed(),
+                status: self.status,
+                bytes_sent: self.bytes_sent,
+                rows_streamed: rows,
+                sql_query: &self.sql_query,
+            });
+        }
+    }
+}
+
+impl<S> Drop for MetricTrackingStream<S> {
+    fn drop(&mut self) {
+        self.finish_tracking();
+    }
+}
+
+/// Creates the Axum router configured with the shared SQLite connection pool and metrics state.
+pub fn create_router(connection_pool: ConnectionPool, metrics: Arc<ServerMetrics>) -> Router {
+    let state = AppState {
+        connection_pool,
+        metrics,
+    };
+
     Router::new()
         .route("/", get(root))
+        .route("/api/metrics", get(get_metrics))
+        .route("/metrics", get(get_metrics))
         .layer(CorsLayer::permissive())
-        .with_state(connection_pool)
+        .with_state(state)
+}
+
+/// Handles `GET /api/metrics` to return the real-time metrics snapshot.
+pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.metrics.snapshot())
 }
 
 /// Handles HTTP `GET /` requests to execute SQL queries and stream CSV or Parquet results.
 pub async fn root(
     ConnectInfo(client_address): ConnectInfo<SocketAddr>,
-    State(connection_pool): State<ConnectionPool>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     Query(parameters): Query<SqlParameters>,
 ) -> Result<impl IntoResponse, AppError> {
+    let start_time = Instant::now();
+    state.metrics.request_started();
+
     let raw_sql_query = parameters.sql.unwrap_or_default();
     let sql_query = raw_sql_query.trim();
+    let client_ip_address = client_address.ip();
 
     if sql_query.is_empty() {
+        state.metrics.record_request(RequestEvent {
+            client_ip: client_ip_address,
+            format_indicator: "C",
+            duration: start_time.elapsed(),
+            status: 400,
+            bytes_sent: 0,
+            rows_streamed: 0,
+            sql_query: "",
+        });
         return Err(AppError::BadRequest(
             "Error: No SQL query provided\r\n".to_string(),
         ));
@@ -113,24 +216,77 @@ pub async fn root(
             OutputFormat::Parquet
         }
         Some(invalid) => {
+            state.metrics.record_request(RequestEvent {
+                client_ip: client_ip_address,
+                format_indicator: "C",
+                duration: start_time.elapsed(),
+                status: 400,
+                bytes_sent: 0,
+                rows_streamed: 0,
+                sql_query,
+            });
             return Err(AppError::BadRequest(format!(
                 "Error: Unsupported format '{invalid}'. Supported formats are 'csv' and 'parquet'.\r\n"
             )));
         }
     };
 
-    let client_ip_address = client_address.ip();
     let format_indicator = output_format.indicator();
     let single_line_query_log = format_query_for_logging(sql_query);
     tracing::info!("{client_ip_address} | {format_indicator} | {single_line_query_log}");
 
-    let connection = connection_pool.get_connection();
-    let response_body = match output_format {
-        OutputFormat::Csv => db::query_as_csv_stream(&connection, sql_query.to_string()).await?,
+    let connection = state.connection_pool.get_connection();
+    let row_counter = Arc::new(AtomicU64::new(0));
+
+    let stream_result = match output_format {
+        OutputFormat::Csv => {
+            db::query_as_csv_stream(
+                &connection,
+                sql_query.to_string(),
+                Some(row_counter.clone()),
+            )
+            .await
+        }
         OutputFormat::Parquet => {
-            db::query_as_parquet_stream(&connection, sql_query.to_string()).await?
+            db::query_as_parquet_stream(
+                &connection,
+                sql_query.to_string(),
+                Some(row_counter.clone()),
+            )
+            .await
         }
     };
+
+    let raw_stream = match stream_result {
+        Ok(s) => s,
+        Err(err) => {
+            state.metrics.record_request(RequestEvent {
+                client_ip: client_ip_address,
+                format_indicator,
+                duration: start_time.elapsed(),
+                status: 500,
+                bytes_sent: 0,
+                rows_streamed: 0,
+                sql_query,
+            });
+            return Err(err);
+        }
+    };
+
+    let tracking_stream = MetricTrackingStream {
+        inner: raw_stream,
+        metrics: state.metrics.clone(),
+        client_ip: client_ip_address,
+        format_indicator,
+        sql_query: single_line_query_log,
+        start_time,
+        row_counter,
+        bytes_sent: 0,
+        status: 200,
+        finished: false,
+    };
+
+    let response_body = axum::body::Body::from_stream(tracking_stream);
 
     Ok((
         [(header::CONTENT_TYPE, output_format.content_type())],
@@ -204,7 +360,8 @@ mod tests {
             .unwrap();
 
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -238,7 +395,8 @@ mod tests {
 
         let connection = Connection::open_in_memory().await.unwrap();
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -268,7 +426,8 @@ mod tests {
 
         let connection = Connection::open_in_memory().await.unwrap();
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -304,7 +463,8 @@ mod tests {
             .unwrap();
 
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -353,7 +513,8 @@ mod tests {
             .unwrap();
 
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -387,7 +548,8 @@ mod tests {
 
         let connection = Connection::open_in_memory().await.unwrap();
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -411,7 +573,8 @@ mod tests {
 
         let connection = Connection::open_in_memory().await.unwrap();
         let connection_pool = ConnectionPool::new(vec![connection]);
-        let application = create_router(connection_pool);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics);
 
         let response = application
             .oneshot(
@@ -425,5 +588,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_metrics_endpoint() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let connection = Connection::open_in_memory().await.unwrap();
+        let connection_pool = ConnectionPool::new(vec![connection]);
+        let metrics = Arc::new(ServerMetrics::new());
+        let application = create_router(connection_pool, metrics.clone());
+
+        // Perform a query first
+        let _ = application
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/?sql=SELECT+1+AS+val")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let response = application
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["total_requests"], 1);
+        assert_eq!(json["successful_requests"], 1);
+        assert_eq!(json["failed_requests"], 0);
     }
 }

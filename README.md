@@ -104,6 +104,26 @@ resp = requests.get("http://localhost:8002/?sql=SELECT+*+FROM+temperatures&forma
 df = pl.read_parquet(io.BytesIO(resp.content))
 ```
 
+### `GET /api/metrics`
+
+Returns a real-time JSON metrics snapshot including:
+- Cumulative requests (total, successful, failed, active in-flight)
+- Data transfer volume (CSV vs. Parquet) and total rows streamed
+- Request throughput (`current_rps`), transfer rate (`current_bytes_per_sec`), and row throughput (`current_rows_per_sec`)
+- 60-second rolling time-series history
+- Per-client host breakdown (IP, total requests, rows, bytes, average latency, last active)
+- Recent 30 queries log
+
+```bash
+curl http://localhost:8002/api/metrics
+```
+
+## Web UI Studio & Live Dashboard
+
+`readql` ships with an embedded single-page application on port `8001` (`http://localhost:8001`) with zero external dependencies:
+- **Query Studio:** Interactive table explorer, SQL query editor (`Ctrl+Enter`), query history in `localStorage`, data grid, and 1-click export (CSV, Parquet, Python Pandas/Polars snippets).
+- **Live Dashboard:** Real-time KPI summary cards, hardware-accelerated 60s Canvas graphs (Req/s throughput and MB/s transfer rate), active client host statistics table, and recent query execution log.
+
 ## Development & Testing
 
 ```bash

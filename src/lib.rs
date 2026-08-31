@@ -38,3 +38,7 @@ pub mod handlers;
 
 /// Web UI router and static assets.
 pub mod ui;
+
+/// Server metrics tracking and snapshot generation.
+pub mod metrics;
+pub use metrics::ServerMetrics;

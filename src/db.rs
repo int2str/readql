@@ -19,9 +19,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use axum::body::Body;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_rusqlite::{Connection, OpenFlags};
@@ -121,11 +120,12 @@ pub async fn open_file(database_path: &Path) -> Result<Connection, tokio_rusqlit
 }
 
 /// Executes a SQL query against the database and streams the RFC 4180 CSV result
-/// in chunks as an Axum `Body`. Fails early if the SQL statement cannot be prepared.
+/// in chunks as a `ReceiverStream`. Fails early if the SQL statement cannot be prepared.
 pub async fn query_as_csv_stream(
     connection: &Connection,
     sql_query: String,
-) -> Result<Body, AppError> {
+    row_counter: Option<Arc<AtomicU64>>,
+) -> Result<ReceiverStream<Result<Bytes, std::io::Error>>, AppError> {
     let (chunk_sender, chunk_receiver) = mpsc::channel(CHANNEL_CAPACITY);
     let (prepared_sender, prepared_receiver) = tokio::sync::oneshot::channel();
     let connection_clone = connection.clone();
@@ -177,6 +177,10 @@ pub async fn query_as_csv_stream(
                 loop {
                     match query_rows.next() {
                         Ok(Some(row)) => {
+                            if let Some(ref counter) = row_counter {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+
                             if let Err(error) = csv_writer.write_row(row, column_count) {
                                 tracing::error!("Failed to write CSV row: {error}");
                                 let _ = chunk_sender
@@ -218,7 +222,7 @@ pub async fn query_as_csv_stream(
     });
 
     match prepared_receiver.await {
-        Ok(Ok(())) => Ok(Body::from_stream(ReceiverStream::new(chunk_receiver))),
+        Ok(Ok(())) => Ok(ReceiverStream::new(chunk_receiver)),
         Ok(Err(error)) => Err(AppError::BadRequest(format!(
             "SQL query error: {error}\r\n"
         ))),
@@ -229,11 +233,12 @@ pub async fn query_as_csv_stream(
 }
 
 /// Executes a SQL query against the database and streams the Parquet result
-/// in chunks as an Axum `Body`. Fails early if the SQL statement cannot be prepared.
+/// in chunks as a `ReceiverStream`. Fails early if the SQL statement cannot be prepared.
 pub async fn query_as_parquet_stream(
     connection: &Connection,
     sql_query: String,
-) -> Result<Body, AppError> {
+    row_counter: Option<Arc<AtomicU64>>,
+) -> Result<ReceiverStream<Result<Bytes, std::io::Error>>, AppError> {
     let (chunk_sender, chunk_receiver) = mpsc::channel(CHANNEL_CAPACITY);
     let (prepared_sender, prepared_receiver) = tokio::sync::oneshot::channel();
     let connection_clone = connection.clone();
@@ -289,19 +294,25 @@ pub async fn query_as_parquet_stream(
                 let mut accumulator = RecordBatchAccumulator::new(schema, ROW_BATCH_SIZE);
                 let has_first_row = first_row.is_some();
 
-                if let Some(row) = first_row
-                    && let Err(error) = accumulator.append_row(row)
-                {
-                    tracing::error!("Failed to append first row: {error}");
-                    let _ =
-                        chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-                    return Ok(());
+                if let Some(row) = first_row {
+                    if let Some(ref counter) = row_counter {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Err(error) = accumulator.append_row(row) {
+                        tracing::error!("Failed to append first row: {error}");
+                        let _ = chunk_sender
+                            .blocking_send(Err(std::io::Error::other(error.to_string())));
+                        return Ok(());
+                    }
                 }
 
                 if has_first_row {
                     loop {
                         match query_rows.next() {
                             Ok(Some(row)) => {
+                                if let Some(ref counter) = row_counter {
+                                    counter.fetch_add(1, Ordering::Relaxed);
+                                }
                                 if let Err(error) = accumulator.append_row(row) {
                                     tracing::error!("Failed to append Parquet row: {error}");
                                     let _ = chunk_sender.blocking_send(Err(std::io::Error::other(
@@ -382,7 +393,7 @@ pub async fn query_as_parquet_stream(
     });
 
     match prepared_receiver.await {
-        Ok(Ok(())) => Ok(Body::from_stream(ReceiverStream::new(chunk_receiver))),
+        Ok(Ok(())) => Ok(ReceiverStream::new(chunk_receiver)),
         Ok(Err(error)) => Err(AppError::BadRequest(format!(
             "SQL query error: {error}\r\n"
         ))),
@@ -496,6 +507,7 @@ pub async fn query_as_parquet(
 mod tests {
     use super::*;
     use arrow_array::RecordBatchReader;
+    use axum::body::Body;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     #[tokio::test]
@@ -520,9 +532,14 @@ mod tests {
             "id,name,price\r\n1,apple,1.25\r\n2,banana,0.75\r\n"
         );
 
-        let body = query_as_csv_stream(&connection, "SELECT * FROM items ORDER BY id".to_string())
-            .await
-            .unwrap();
+        let stream = query_as_csv_stream(
+            &connection,
+            "SELECT * FROM items ORDER BY id".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let body = Body::from_stream(stream);
         let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
         assert_eq!(text, "id,name,price\r\n1,apple,1.25\r\n2,banana,0.75\r\n");
@@ -557,12 +574,14 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 4);
 
-        let body = query_as_parquet_stream(
+        let stream = query_as_parquet_stream(
             &connection,
             "SELECT * FROM products ORDER BY id".to_string(),
+            None,
         )
         .await
         .unwrap();
+        let body = Body::from_stream(stream);
         let stream_bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
         assert_eq!(&stream_bytes[0..4], b"PAR1");
 
@@ -583,9 +602,11 @@ mod tests {
             .await
             .unwrap();
 
-        let body = query_as_parquet_stream(&connection, "SELECT * FROM empty_table".to_string())
-            .await
-            .unwrap();
+        let stream =
+            query_as_parquet_stream(&connection, "SELECT * FROM empty_table".to_string(), None)
+                .await
+                .unwrap();
+        let body = Body::from_stream(stream);
         let stream_bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
         assert_eq!(&stream_bytes[0..4], b"PAR1");
 
@@ -606,17 +627,24 @@ mod tests {
     #[tokio::test]
     async fn test_query_as_csv_stream_invalid_query() {
         let connection = Connection::open_in_memory().await.unwrap();
-        let result =
-            query_as_csv_stream(&connection, "SELECT * FROM nonexistent_table".to_string()).await;
+        let result = query_as_csv_stream(
+            &connection,
+            "SELECT * FROM nonexistent_table".to_string(),
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_query_as_parquet_stream_invalid_query() {
         let connection = Connection::open_in_memory().await.unwrap();
-        let result =
-            query_as_parquet_stream(&connection, "SELECT * FROM nonexistent_table".to_string())
-                .await;
+        let result = query_as_parquet_stream(
+            &connection,
+            "SELECT * FROM nonexistent_table".to_string(),
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 

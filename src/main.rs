@@ -15,6 +15,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -67,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connection_pool.size()
     );
 
-    let api_router = create_router(connection_pool);
+    let metrics = Arc::new(readql::metrics::ServerMetrics::new());
+    let api_router = create_router(connection_pool, metrics);
     let api_address = SocketAddr::new(arguments.listen, arguments.port);
     let api_listener = TcpListener::bind(api_address).await?;
     tracing::info!("API server listening on http://{api_address}");
