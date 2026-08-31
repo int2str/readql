@@ -429,7 +429,7 @@
     /* Top KPI Cards Grid */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 1rem;
     }
 
@@ -800,12 +800,11 @@
         <div class="kpi-card">
           <div class="kpi-header">
             <span>Average Latency</span>
-            <span class="pill pill-accent">Query Time</span>
+            <span class="pill pill-accent">Latency</span>
           </div>
           <div class="kpi-value" id="kpi-avg-latency">0.0 ms</div>
           <div class="kpi-sub">
-            <span>Server Uptime:</span>
-            <strong id="kpi-uptime">-</strong>
+            <span>Cumulative mean</span>
           </div>
         </div>
 
@@ -816,8 +815,17 @@
           </div>
           <div class="kpi-value" id="kpi-active-reqs" style="color: var(--success);">0</div>
           <div class="kpi-sub">
-            <span>Concurrent Queries</span>
+            <span>Concurrent queries</span>
           </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-header">
+            <span>Server Uptime</span>
+            <span class="pill pill-success">Online</span>
+          </div>
+          <div class="kpi-value" id="kpi-uptime">0s</div>
+          <div class="kpi-sub"></div>
         </div>
       </div>
 
