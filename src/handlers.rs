@@ -46,6 +46,14 @@ impl OutputFormat {
             OutputFormat::Parquet => "application/vnd.apache.parquet",
         }
     }
+
+    /// Returns the single-character indicator for structured query logging.
+    pub fn indicator(&self) -> &'static str {
+        match self {
+            OutputFormat::Csv => "C",
+            OutputFormat::Parquet => "P",
+        }
+    }
 }
 
 /// Query parameters extracted from the HTTP request URL.
@@ -62,10 +70,13 @@ pub fn format_query_for_logging(sql_query: &str) -> String {
     sql_query.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+use tower_http::cors::CorsLayer;
+
 /// Creates the Axum router configured with the shared SQLite connection pool state.
 pub fn create_router(connection_pool: ConnectionPool) -> Router {
     Router::new()
         .route("/", get(root))
+        .layer(CorsLayer::permissive())
         .with_state(connection_pool)
 }
 
@@ -109,8 +120,9 @@ pub async fn root(
     };
 
     let client_ip_address = client_address.ip();
+    let format_indicator = output_format.indicator();
     let single_line_query_log = format_query_for_logging(sql_query);
-    tracing::info!("{client_ip_address} | {single_line_query_log}");
+    tracing::info!("{client_ip_address} | {format_indicator} | {single_line_query_log}");
 
     let connection = connection_pool.get_connection();
     let response_body = match output_format {
@@ -160,6 +172,12 @@ mod tests {
             format_query_for_logging("   SELECT    *    FROM    users   "),
             "SELECT * FROM users"
         );
+    }
+
+    #[test]
+    fn test_output_format_indicator() {
+        assert_eq!(OutputFormat::Csv.indicator(), "C");
+        assert_eq!(OutputFormat::Parquet.indicator(), "P");
     }
 
     #[test]

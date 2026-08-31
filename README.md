@@ -9,6 +9,7 @@ This project was inspired by the wonderful [Datasette](https://datasette.io/) pr
 - **High Throughput & Low Latency:** Optimized SQLite read configuration with `mmap`, `cache_size`, and in-memory temporary storage.
 - **Zero-Copy CSV Streaming:** Uses `ValueRef` column inspection to eliminate intermediate allocations while formatting results directly to RFC 4180 CSV.
 - **Apache Parquet Streaming:** High-performance binary columnar format with Zstandard compression for data science tools like Pandas, Polars, and DuckDB.
+- **Built-in Web UI Studio:** Interactive browser query UI running on port `8001` with schema explorer, query history, and data export.
 - **Asynchronous Architecture:** Built on Axum and Tokio for high concurrency.
 
 ## Prerequisites
@@ -32,14 +33,14 @@ cargo build --release
 ## CLI Usage
 
 ```bash
-# Start server with default host (0.0.0.0) and port (8002)
+# Start server (API on port 8002, Web UI on port 8001)
 readql <path-to-sqlite-db>
 
-# Custom host and port
-readql <path-to-sqlite-db> --listen 127.0.0.1 --port 9000
+# Custom host, API port, and UI port
+readql <path-to-sqlite-db> --listen 127.0.0.1 --port 9000 --ui-port 9001
 
-# Short flag syntax
-readql <path-to-sqlite-db> -l 127.0.0.1 -p 9000
+# Disable Web UI (run API server only)
+readql <path-to-sqlite-db> --no-ui
 
 # Display help
 readql --help
@@ -51,7 +52,10 @@ readql --help
 | :--- | :--- | :--- | :--- |
 | `<DB_PATH>` | | Path to the SQLite database file | *(Required)* |
 | `--listen` | `-l` | IP address to listen on | `0.0.0.0` |
-| `--port` | `-p` | TCP port to listen on | `8002` |
+| `--port` | `-p` | TCP port to listen on for the API | `8002` |
+| `--ui-port` | | TCP port to listen on for the Web UI | `8001` |
+| `--no-ui` | | Disable the Web UI server | `false` |
+| `--connections` | `-c` | Number of pooled SQLite connections | *(CPU Cores)* |
 | `--help` | `-h` | Print help information | |
 | `--version` | `-V` | Print version information | |
 

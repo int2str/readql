@@ -35,3 +35,6 @@ pub use error::AppError;
 
 /// Axum HTTP request handlers and routing.
 pub mod handlers;
+
+/// Web UI router and static assets.
+pub mod ui;
