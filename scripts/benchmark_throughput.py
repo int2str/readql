@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import io
 import statistics
 import time
 import urllib.error
@@ -50,6 +51,26 @@ def fmt_ms(val_s: float) -> str:
         return f"{val_ms:,.1f} ms"
     else:
         return f"{val_ms:.2f} ms"
+
+
+def fmt_rows_s(rows_per_sec: float) -> str:
+    """Formats throughput as rows per second."""
+    return f"{rows_per_sec:,.0f} rows/s"
+
+
+def count_rows_in_response(body: bytes, output_format: str) -> int:
+    """Extracts the number of data rows returned in an HTTP response."""
+    if not body:
+        return 0
+    if output_format == "parquet":
+        try:
+            import pyarrow.parquet as pq
+            return pq.ParquetFile(io.BytesIO(body)).metadata.num_rows
+        except Exception:
+            pass
+    # For CSV format (count lines and subtract header)
+    lines = body.count(b"\n")
+    return max(0, lines - 1)
 
 
 def fetch(url: str, timeout: float = 30.0) -> tuple[bool, float, int, int, str]:
@@ -121,13 +142,16 @@ def run_benchmark(
     print(f"Timeout:        {timeout:.1f} s")
     print("-" * 75)
 
-    print("Warming up server and connection pool...")
-    warmup_parsed = urllib.parse.urlparse(target_url)
-    warmup_url = f"{warmup_parsed.scheme}://{warmup_parsed.netloc}/?sql=SELECT+1"
+    print("Warming up server and detecting row count...")
+    rows_per_request = 0
     try:
-        urllib.request.urlopen(warmup_url, timeout=5.0)
-    except Exception:
-        pass
+        req = urllib.request.Request(target_url, headers={"User-Agent": "readql-benchmark/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            sample_body = response.read()
+            rows_per_request = count_rows_in_response(sample_body, output_format)
+    except Exception as e:
+        print(f"Warning: Warmup probe failed ({e})")
+
     print("Running benchmark...\n")
 
     latencies: list[float] = []
@@ -153,6 +177,8 @@ def run_benchmark(
     successful_reqs = total_requests - len(errors)
     rps = total_requests / bench_duration if bench_duration > 0 else 0
     bytes_per_sec = total_bytes / bench_duration if bench_duration > 0 else 0
+    total_rows = successful_reqs * rows_per_request
+    rows_per_sec = total_rows / bench_duration if bench_duration > 0 else 0
 
     latencies.sort()
 
@@ -162,7 +188,10 @@ def run_benchmark(
     print(f"{'Metric':<24} | {'Value'}")
     print("-" * 75)
     print(f"{'Total Duration':<24} | {bench_duration:.3f} s")
-    print(f"{'Throughput':<24} | {rps:,.2f} req/s")
+    print(f"{'Request Throughput':<24} | {rps:,.2f} req/s")
+    if rows_per_request > 0:
+        print(f"{'Rows Processed':<24} | {total_rows:,} rows ({rows_per_request:,} rows/req)")
+        print(f"{'Row Throughput':<24} | {fmt_rows_s(rows_per_sec)}")
     print(f"{'Data Transferred':<24} | {format_bytes(total_bytes)} ({total_bytes:,} bytes)")
     print(f"{'Transfer Rate':<24} | {format_bytes(bytes_per_sec)}/s ({bytes_per_sec:,.2f} B/s)")
     print(f"{'Total Requests':<24} | {total_requests}")
