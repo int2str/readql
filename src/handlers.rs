@@ -150,6 +150,9 @@ impl<S> Drop for MetricTrackingStream<S> {
     }
 }
 
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+
 /// Creates the Axum router configured with the shared SQLite connection pool and metrics state.
 pub fn create_router(connection_pool: ConnectionPool, metrics: Arc<ServerMetrics>) -> Router {
     let state = AppState {
@@ -157,11 +160,15 @@ pub fn create_router(connection_pool: ConnectionPool, metrics: Arc<ServerMetrics
         metrics,
     };
 
+    let compression_predicate =
+        DefaultPredicate::default().and(NotForContentType::new("application/vnd.apache.parquet"));
+
     Router::new()
         .route("/", get(root))
         .route("/api/metrics", get(get_metrics))
         .route("/metrics", get(get_metrics))
         .layer(CorsLayer::permissive())
+        .layer(CompressionLayer::new().compress_when(compression_predicate))
         .with_state(state)
 }
 

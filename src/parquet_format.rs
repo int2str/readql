@@ -56,8 +56,10 @@ impl Write for ChunkWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buffer.extend_from_slice(buf);
         if self.buffer.len() >= self.chunk_size {
-            let chunk = Bytes::copy_from_slice(&self.buffer);
-            self.buffer.clear();
+            let chunk = Bytes::from(std::mem::replace(
+                &mut self.buffer,
+                Vec::with_capacity(self.chunk_size + 4096),
+            ));
             if self.sender.blocking_send(Ok(chunk)).is_err() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -70,8 +72,7 @@ impl Write for ChunkWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         if !self.buffer.is_empty() {
-            let chunk = Bytes::copy_from_slice(&self.buffer);
-            self.buffer.clear();
+            let chunk = Bytes::from(std::mem::take(&mut self.buffer));
             if self.sender.blocking_send(Ok(chunk)).is_err() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -318,16 +319,41 @@ impl RecordBatchAccumulator {
     }
 }
 
-/// Creates an [`ArrowWriter`] with Zstandard compression for writing Parquet data.
+use parquet::basic::{Encoding, ZstdLevel};
+use parquet::schema::types::ColumnPath;
+
+/// Creates an [`ArrowWriter`] with optimized encodings (DELTA_BINARY_PACKED, BYTE_STREAM_SPLIT)
+/// and Zstandard compression (level 7) for maximum network throughput and reduced wire frame size.
 pub fn create_parquet_writer<W: Write + Send>(
     sink: W,
     schema: SchemaRef,
 ) -> Result<ArrowWriter<W>, parquet::errors::ParquetError> {
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .build();
+    let mut builder = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(7).unwrap_or_default()));
 
-    ArrowWriter::try_new(sink, schema, Some(properties))
+    for field in schema.fields() {
+        let col_path = ColumnPath::from(field.name().as_str());
+        match field.data_type() {
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64 => {
+                builder = builder
+                    .set_column_dictionary_enabled(col_path.clone(), false)
+                    .set_column_encoding(col_path, Encoding::DELTA_BINARY_PACKED);
+            }
+            DataType::Float32 | DataType::Float64 => {
+                builder = builder.set_column_encoding(col_path, Encoding::BYTE_STREAM_SPLIT);
+            }
+            _ => {}
+        }
+    }
+
+    ArrowWriter::try_new(sink, schema, Some(builder.build()))
 }
 
 #[cfg(test)]
