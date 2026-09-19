@@ -22,9 +22,14 @@ pub async fn serve_index(State(state): State<Arc<UiState>>) -> Response {
         .unwrap_or_else(|_| Html(INDEX_HTML_TEMPLATE.to_string()).into_response())
 }
 
+use tower_http::compression::CompressionLayer;
+
 pub fn create_ui_router(api_port: u16) -> Router {
     let state = Arc::new(UiState { api_port });
-    Router::new().route("/", get(serve_index)).with_state(state)
+    Router::new()
+        .route("/", get(serve_index))
+        .layer(CompressionLayer::new())
+        .with_state(state)
 }
 
 #[cfg(test)]
