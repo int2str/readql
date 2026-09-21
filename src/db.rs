@@ -35,7 +35,8 @@ use crate::parquet_format::{
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64 KB per CSV/Parquet chunk
 const CHANNEL_CAPACITY: usize = 16; // Max 16 chunks buffered (~1 MB max in-memory)
-const ROW_BATCH_SIZE: usize = 8192; // Max rows per Arrow RecordBatch
+const ROW_BATCH_SIZE: usize = 65_356; // Max rows per Arrow RecordBatch
+const RECORD_BATCH_CHANNEL_CAPACITY: usize = 8; // Max 8 RecordBatches queued between SQLite and Parquet encoder (~2.5 MB)
 
 /// A pool of read-only SQLite database connections for concurrent query execution.
 #[derive(Clone)]
@@ -233,26 +234,27 @@ pub async fn query_as_csv_stream(
 }
 
 /// Executes a SQL query against the database and streams the Parquet result
-/// in chunks as a `ReceiverStream`. Fails early if the SQL statement cannot be prepared.
+/// in chunks as a `ReceiverStream`. RecordBatch generation and Parquet encoding
+/// run concurrently across threads for optimal throughput.
 pub async fn query_as_parquet_stream(
     connection: &Connection,
     sql_query: String,
     row_counter: Option<Arc<AtomicU64>>,
 ) -> Result<ReceiverStream<Result<Bytes, std::io::Error>>, AppError> {
     let (chunk_sender, chunk_receiver) = mpsc::channel(CHANNEL_CAPACITY);
-    let (prepared_sender, prepared_receiver) = tokio::sync::oneshot::channel();
-    let connection_clone = connection.clone();
+    let (schema_sender, schema_receiver) = tokio::sync::oneshot::channel();
+    let (batch_sender, mut batch_receiver) = mpsc::channel(RECORD_BATCH_CHANNEL_CAPACITY);
 
-    tokio::spawn(async move {
+    let connection_clone = connection.clone();
+    let chunk_sender_clone = chunk_sender.clone();
+
+    let producer_task = tokio::spawn(async move {
         let result = connection_clone
             .call(move |raw_connection| {
                 let mut prepared_statement = match raw_connection.prepare(&sql_query) {
-                    Ok(statement) => {
-                        let _ = prepared_sender.send(Ok(()));
-                        statement
-                    }
+                    Ok(statement) => statement,
                     Err(error) => {
-                        let _ = prepared_sender.send(Err(error));
+                        let _ = schema_sender.send(Err(error));
                         return Ok::<(), tokio_rusqlite::rusqlite::Error>(());
                     }
                 };
@@ -263,8 +265,7 @@ pub async fn query_as_parquet_stream(
                     Ok(rows) => rows,
                     Err(error) => {
                         tracing::error!("Failed to execute query: {error}");
-                        let _ = chunk_sender
-                            .blocking_send(Err(std::io::Error::other(error.to_string())));
+                        let _ = schema_sender.send(Err(error));
                         return Ok(());
                     }
                 };
@@ -273,26 +274,19 @@ pub async fn query_as_parquet_stream(
                     Ok(row) => row,
                     Err(error) => {
                         tracing::error!("Failed to fetch initial row: {error}");
-                        let _ = chunk_sender
-                            .blocking_send(Err(std::io::Error::other(error.to_string())));
+                        let _ = schema_sender.send(Err(error));
                         return Ok(());
                     }
                 };
 
                 let schema = infer_schema_from_metadata(&column_metadata, first_row);
-                let chunk_writer = ChunkWriter::new(chunk_sender.clone(), CHUNK_SIZE);
-                let mut parquet_writer = match create_parquet_writer(chunk_writer, schema.clone()) {
-                    Ok(writer) => writer,
-                    Err(error) => {
-                        tracing::error!("Failed to initialize Parquet writer: {error}");
-                        let _ = chunk_sender
-                            .blocking_send(Err(std::io::Error::other(error.to_string())));
-                        return Ok(());
-                    }
-                };
+                let has_first_row = first_row.is_some();
+
+                if schema_sender.send(Ok(schema.clone())).is_err() {
+                    return Ok(());
+                }
 
                 let mut accumulator = RecordBatchAccumulator::new(schema, ROW_BATCH_SIZE);
-                let has_first_row = first_row.is_some();
 
                 if let Some(row) = first_row {
                     if let Some(ref counter) = row_counter {
@@ -300,7 +294,7 @@ pub async fn query_as_parquet_stream(
                     }
                     if let Err(error) = accumulator.append_row(row) {
                         tracing::error!("Failed to append first row: {error}");
-                        let _ = chunk_sender
+                        let _ = chunk_sender_clone
                             .blocking_send(Err(std::io::Error::other(error.to_string())));
                         return Ok(());
                     }
@@ -315,33 +309,27 @@ pub async fn query_as_parquet_stream(
                                 }
                                 if let Err(error) = accumulator.append_row(row) {
                                     tracing::error!("Failed to append Parquet row: {error}");
-                                    let _ = chunk_sender.blocking_send(Err(std::io::Error::other(
-                                        error.to_string(),
-                                    )));
-                                    return Ok(());
+                                    let _ = chunk_sender_clone.blocking_send(Err(
+                                        std::io::Error::other(error.to_string()),
+                                    ));
+                                    break;
                                 }
 
                                 if accumulator.is_full() {
                                     match accumulator.finish_batch() {
                                         Ok(batch) => {
-                                            if let Err(error) = parquet_writer.write(&batch) {
-                                                tracing::error!(
-                                                    "Failed to write Parquet batch: {error}"
-                                                );
-                                                let _ = chunk_sender.blocking_send(Err(
-                                                    std::io::Error::other(error.to_string()),
-                                                ));
-                                                return Ok(());
+                                            if batch_sender.blocking_send(batch).is_err() {
+                                                break;
                                             }
                                         }
                                         Err(error) => {
                                             tracing::error!(
                                                 "Failed to create RecordBatch: {error}"
                                             );
-                                            let _ = chunk_sender.blocking_send(Err(
+                                            let _ = chunk_sender_clone.blocking_send(Err(
                                                 std::io::Error::other(error.to_string()),
                                             ));
-                                            return Ok(());
+                                            break;
                                         }
                                     }
                                 }
@@ -349,9 +337,9 @@ pub async fn query_as_parquet_stream(
                             Ok(None) => break,
                             Err(error) => {
                                 tracing::error!("Failed to fetch next row: {error}");
-                                let _ = chunk_sender
+                                let _ = chunk_sender_clone
                                     .blocking_send(Err(std::io::Error::other(error.to_string())));
-                                return Ok(());
+                                break;
                             }
                         }
                     }
@@ -360,27 +348,14 @@ pub async fn query_as_parquet_stream(
                 if !accumulator.is_empty() || !has_first_row {
                     match accumulator.finish_batch() {
                         Ok(batch) => {
-                            if let Err(error) = parquet_writer.write(&batch) {
-                                tracing::error!("Failed to write final Parquet batch: {error}");
-                                let _ = chunk_sender
-                                    .blocking_send(Err(std::io::Error::other(error.to_string())));
-                                return Ok(());
-                            }
+                            let _ = batch_sender.blocking_send(batch);
                         }
                         Err(error) => {
                             tracing::error!("Failed to finish final RecordBatch: {error}");
-                            let _ = chunk_sender
+                            let _ = chunk_sender_clone
                                 .blocking_send(Err(std::io::Error::other(error.to_string())));
-                            return Ok(());
                         }
                     }
-                }
-
-                if let Err(error) = parquet_writer.close() {
-                    tracing::error!("Failed to close Parquet writer: {error}");
-                    let _ =
-                        chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-                    return Ok(());
                 }
 
                 Ok(())
@@ -392,15 +367,58 @@ pub async fn query_as_parquet_stream(
         }
     });
 
-    match prepared_receiver.await {
-        Ok(Ok(())) => Ok(ReceiverStream::new(chunk_receiver)),
-        Ok(Err(error)) => Err(AppError::BadRequest(format!(
-            "SQL query error: {error}\r\n"
-        ))),
-        Err(_) => Err(AppError::BadRequest(
-            "Failed to initialize Parquet query stream\r\n".to_string(),
-        )),
-    }
+    let schema = match schema_receiver.await {
+        Ok(Ok(schema)) => schema,
+        Ok(Err(error)) => {
+            return Err(AppError::BadRequest(format!(
+                "SQL query error: {error}\r\n"
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::BadRequest(
+                "Failed to initialize Parquet query stream\r\n".to_string(),
+            ));
+        }
+    };
+
+    let consumer_handle = tokio::task::spawn_blocking(move || {
+        let chunk_writer = ChunkWriter::new(chunk_sender.clone(), CHUNK_SIZE);
+        let mut parquet_writer = match create_parquet_writer(chunk_writer, schema) {
+            Ok(writer) => writer,
+            Err(error) => {
+                tracing::error!("Failed to initialize Parquet writer: {error}");
+                let _ = chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+                return;
+            }
+        };
+
+        let mut stream_cancelled = false;
+        while let Some(batch) = batch_receiver.blocking_recv() {
+            if let Err(error) = parquet_writer.write(&batch) {
+                if !error.to_string().contains("Client disconnected") {
+                    tracing::error!("Failed to write Parquet batch: {error}");
+                    let _ =
+                        chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+                }
+                stream_cancelled = true;
+                break;
+            }
+        }
+
+        if !stream_cancelled
+            && let Err(error) = parquet_writer.close()
+            && !error.to_string().contains("Client disconnected")
+        {
+            tracing::error!("Failed to close Parquet writer: {error}");
+            let _ = chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+        }
+    });
+
+    tokio::spawn(async move {
+        let _ = tokio::join!(producer_task, consumer_handle);
+    });
+
+    Ok(ReceiverStream::new(chunk_receiver))
 }
 
 /// Executes a SQL query against the database and returns the result formatted
