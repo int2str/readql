@@ -329,7 +329,7 @@ pub fn create_parquet_writer<W: Write + Send>(
     schema: SchemaRef,
 ) -> Result<ArrowWriter<W>, parquet::errors::ParquetError> {
     let mut builder = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(7).unwrap_or_default()));
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(1).unwrap_or_default()));
 
     for field in schema.fields() {
         let col_path = ColumnPath::from(field.name().as_str());
