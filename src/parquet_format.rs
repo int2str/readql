@@ -26,8 +26,9 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
+use parquet::basic::{Compression, Encoding};
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
 use tokio_rusqlite::rusqlite::types::ValueRef;
 use tokio_rusqlite::rusqlite::{Row, Statement};
 
@@ -266,17 +267,13 @@ impl RecordBatchAccumulator {
     }
 }
 
-use parquet::basic::{Encoding, ZstdLevel};
-use parquet::schema::types::ColumnPath;
-
 /// Creates an [`ArrowWriter`] with optimized encodings (DELTA_BINARY_PACKED, BYTE_STREAM_SPLIT)
-/// and Zstandard compression (level 7) for maximum network throughput and reduced wire frame size.
+/// and Snappy compression for high throughput and low CPU overhead.
 pub fn create_parquet_writer<W: Write + Send>(
     sink: W,
     schema: SchemaRef,
 ) -> Result<ArrowWriter<W>, parquet::errors::ParquetError> {
-    let mut builder = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(1).unwrap_or_default()));
+    let mut builder = WriterProperties::builder().set_compression(Compression::SNAPPY);
 
     for field in schema.fields() {
         let col_path = ColumnPath::from(field.name().as_str());
@@ -367,9 +364,17 @@ mod tests {
         assert!(!buffer.is_empty());
         assert_eq!(&buffer[0..4], b"PAR1");
 
-        // Verify Parquet file can be read back
+        // Verify Parquet file can be read back and uses Snappy compression
         let bytes = Bytes::from(buffer);
         let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+        assert_eq!(
+            reader_builder
+                .metadata()
+                .row_group(0)
+                .column(0)
+                .compression(),
+            Compression::SNAPPY
+        );
         let mut reader = reader_builder.build().unwrap();
         let read_batch = reader.next().unwrap().unwrap();
 
