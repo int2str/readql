@@ -8,14 +8,14 @@ This project was inspired by the wonderful [Datasette](https://datasette.io/) pr
 
 - **High Throughput & Low Latency:** Optimized SQLite read configuration with `mmap`, `cache_size`, and in-memory temporary storage.
 - **Zero-Copy CSV Streaming:** Uses `ValueRef` column inspection to eliminate intermediate allocations while formatting results directly to RFC 4180 CSV.
-- **Apache Parquet Streaming:** High-performance binary columnar format with Zstandard compression for data science tools like Pandas, Polars, and DuckDB.
+- **Apache Parquet Streaming:** High-performance binary columnar format with Snappy compression for data science tools like Pandas, Polars, and DuckDB.
 - **Built-in Web UI Studio:** Interactive browser query UI running on port `8001` with schema explorer, query history, and data export.
 - **Asynchronous Architecture:** Built on Axum and Tokio for high concurrency.
 
 ## Prerequisites
 
 - [Rust toolchain](https://rustup.rs/) (edition 2024 / stable 1.85+)
-- SQLite 3
+- SQLite 3 (optional, for database generation and CLI management; SQLite is bundled into the `readql` binary)
 
 ## Installation & Building
 
