@@ -138,6 +138,12 @@ impl<Writer: Write> CsvWriter<Writer> {
     pub fn into_inner(self) -> Writer {
         self.writer
     }
+
+    /// Flushes the underlying writer.
+    #[inline]
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 #[cfg(test)]

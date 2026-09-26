@@ -20,7 +20,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 
-use readql::db::open_pool;
+use readql::db::pool;
 use readql::handlers::create_router;
 use readql::ui::create_ui_router;
 
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Args::parse();
     let pool_size = arguments.connections.unwrap_or(0);
 
-    let connection_pool = open_pool(&arguments.database_path, pool_size).await?;
+    let connection_pool = pool::open_pool(&arguments.database_path, pool_size).await?;
     tracing::info!(
         "Initialized SQLite connection pool with {} connections",
         connection_pool.size()

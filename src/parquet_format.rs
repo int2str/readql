@@ -25,64 +25,11 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use tokio::sync::mpsc;
 use tokio_rusqlite::rusqlite::types::ValueRef;
 use tokio_rusqlite::rusqlite::{Row, Statement};
-
-/// Adapter implementing [`std::io::Write`] that buffers bytes and sends chunks
-/// over a Tokio [`mpsc::Sender`] channel for streaming HTTP responses.
-pub struct ChunkWriter {
-    sender: mpsc::Sender<Result<Bytes, std::io::Error>>,
-    buffer: Vec<u8>,
-    chunk_size: usize,
-}
-
-impl ChunkWriter {
-    /// Creates a new `ChunkWriter` with the given channel sender and chunk buffer size.
-    pub fn new(sender: mpsc::Sender<Result<Bytes, std::io::Error>>, chunk_size: usize) -> Self {
-        Self {
-            sender,
-            buffer: Vec::with_capacity(chunk_size + 4096),
-            chunk_size,
-        }
-    }
-}
-
-impl Write for ChunkWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buffer.extend_from_slice(buf);
-        if self.buffer.len() >= self.chunk_size {
-            let chunk = Bytes::from(std::mem::replace(
-                &mut self.buffer,
-                Vec::with_capacity(self.chunk_size + 4096),
-            ));
-            if self.sender.blocking_send(Ok(chunk)).is_err() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Client disconnected",
-                ));
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if !self.buffer.is_empty() {
-            let chunk = Bytes::from(std::mem::take(&mut self.buffer));
-            if self.sender.blocking_send(Ok(chunk)).is_err() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Client disconnected",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
 
 /// Infers an Arrow [`DataType`] from a column's declared SQLite type and/or sample value.
 pub fn infer_arrow_type(decl_type: Option<&str>, sample_value: Option<&ValueRef>) -> DataType {
@@ -359,6 +306,7 @@ pub fn create_parquet_writer<W: Write + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tokio_rusqlite::rusqlite::Connection;
 
@@ -377,7 +325,7 @@ mod tests {
             DataType::Int64
         );
         assert_eq!(
-            infer_arrow_type(None, Some(&ValueRef::Real(3.14))),
+            infer_arrow_type(None, Some(&ValueRef::Real(3.5))),
             DataType::Float64
         );
         assert_eq!(

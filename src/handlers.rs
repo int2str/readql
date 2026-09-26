@@ -454,7 +454,6 @@ mod tests {
     async fn test_root_handler_parquet_format() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
-        use bytes::Bytes;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
         use tower::ServiceExt;
 
@@ -495,7 +494,7 @@ mod tests {
             .unwrap();
         assert_eq!(&bytes[0..4], b"PAR1");
 
-        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
+        let reader_builder = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
         let mut reader = reader_builder.build().unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 1);
