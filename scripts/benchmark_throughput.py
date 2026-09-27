@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
+import pyarrow.parquet as pq
 import statistics
 import time
 import urllib.error
@@ -63,11 +64,7 @@ def count_rows_in_response(body: bytes, output_format: str) -> int:
     if not body:
         return 0
     if output_format == "parquet":
-        try:
-            import pyarrow.parquet as pq
-            return pq.ParquetFile(io.BytesIO(body)).metadata.num_rows
-        except Exception:
-            pass
+        return pq.ParquetFile(io.BytesIO(body)).metadata.num_rows
     # For CSV format (count lines and subtract header)
     lines = body.count(b"\n")
     return max(0, lines - 1)
