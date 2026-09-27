@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import random
 import sqlite3
 import time
+from pathlib import Path
 
 DEFAULT_COUNT: int = 1_000_000
 BATCH_SIZE: int = 50_000
@@ -110,7 +110,11 @@ def generate_database(db_path: Path | str, count: int = DEFAULT_COUNT) -> None:
         )
         inserted += current_batch_size
         percent = (inserted / count) * 100
-        print(f"\r  Progress: {inserted:,} / {count:,} records ({percent:5.1f}%)", end="", flush=True)
+        print(
+            f"\r  Progress: {inserted:,} / {count:,} records ({percent:5.1f}%)",
+            end="",
+            flush=True,
+        )
 
     conn.commit()
 
@@ -125,7 +129,9 @@ def generate_database(db_path: Path | str, count: int = DEFAULT_COUNT) -> None:
     throughput = count / duration if duration > 0 else 0
 
     print("\n" + "-" * 75)
-    print(f"Generated {count:,} records in {duration:.2f} s ({throughput:,.0f} records/s)")
+    print(
+        f"Generated {count:,} records in {duration:.2f} s ({throughput:,.0f} records/s)"
+    )
     print(f"Database file size: {format_bytes(file_size)}")
     print("=" * 75)
 

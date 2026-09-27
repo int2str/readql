@@ -22,6 +22,7 @@ import argparse
 import io
 import time
 import urllib.parse
+
 import pandas as pd
 import requests
 
@@ -189,8 +190,8 @@ def run_benchmark(base_url: str, sql: str, runs: int) -> None:
     print("Warming up server and connection pool...")
     try:
         requests.get(base_url, params={"sql": "SELECT 1"}, timeout=5.0)
-    except Exception:
-        pass
+    except requests.RequestException as e:
+        print(f"Warning: Warmup probe failed ({e})")
     print("Running benchmark...\n")
 
     csv_totals, csv_fetches, csv_parses = [], [], []
@@ -203,7 +204,9 @@ def run_benchmark(base_url: str, sql: str, runs: int) -> None:
         print(f"Run {i}/{runs}:")
 
         # 1. Benchmark CSV
-        df_csv, total_csv, fetch_csv, parse_csv, size_csv = benchmark_csv_split(base_url, sql)
+        df_csv, total_csv, fetch_csv, parse_csv, size_csv = benchmark_csv_split(
+            base_url, sql
+        )
         csv_totals.append(total_csv)
         csv_fetches.append(fetch_csv)
         csv_parses.append(parse_csv)
@@ -216,7 +219,9 @@ def run_benchmark(base_url: str, sql: str, runs: int) -> None:
         )
 
         # 2. Benchmark Parquet
-        df_pq, total_pq, fetch_pq, parse_pq, size_pq = benchmark_parquet_split(base_url, sql)
+        _df_pq, total_pq, fetch_pq, parse_pq, size_pq = benchmark_parquet_split(
+            base_url, sql
+        )
         pq_totals.append(total_pq)
         pq_fetches.append(fetch_pq)
         pq_parses.append(parse_pq)
@@ -245,7 +250,9 @@ def run_benchmark(base_url: str, sql: str, runs: int) -> None:
     print(f"Rows Loaded:        {row_count:,} rows")
     print(f"Columns:            {col_count} columns")
     print("-" * 75)
-    print(f"{'Metric':<24} | {'Pandas (CSV)':<18} | {'Pandas (Parquet)':<18} | {'Comparison'}")
+    print(
+        f"{'Metric':<24} | {'Pandas (CSV)':<18} | {'Pandas (Parquet)':<18} | {'Comparison'}"
+    )
     print("-" * 75)
     print(
         f"{'Payload Size':<24} | {format_bytes(csv_bytes):<18} | {format_bytes(pq_bytes):<18} | {format_size_comparison(csv_bytes, pq_bytes)}"

@@ -19,14 +19,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextlib
+import http.client
 import io
-import pyarrow.parquet as pq
 import statistics
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 DEFAULT_LIMIT: int = 1_000_000
 DEFAULT_THREADS: int = 10
@@ -83,7 +87,9 @@ def fetch(url: str, timeout: float = 30.0) -> tuple[bool, float, int, int, str]:
     """
     start = time.perf_counter()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "readql-benchmark/1.0"})
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "readql-benchmark/1.0"}
+        )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             body = response.read()
             latency = time.perf_counter() - start
@@ -91,12 +97,10 @@ def fetch(url: str, timeout: float = 30.0) -> tuple[bool, float, int, int, str]:
     except urllib.error.HTTPError as e:
         latency = time.perf_counter() - start
         body_len = 0
-        try:
+        with contextlib.suppress(OSError):
             body_len = len(e.read())
-        except Exception:
-            pass
         return False, latency, e.code, body_len, str(e)
-    except Exception as e:
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
         latency = time.perf_counter() - start
         return False, latency, 0, 0, str(e)
 
@@ -142,11 +146,19 @@ def run_benchmark(
     print("Warming up server and detecting row count...")
     rows_per_request = 0
     try:
-        req = urllib.request.Request(target_url, headers={"User-Agent": "readql-benchmark/1.0"})
+        req = urllib.request.Request(
+            target_url, headers={"User-Agent": "readql-benchmark/1.0"}
+        )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             sample_body = response.read()
             rows_per_request = count_rows_in_response(sample_body, output_format)
-    except Exception as e:
+    except (
+        urllib.error.URLError,
+        OSError,
+        http.client.HTTPException,
+        ValueError,
+        pa.ArrowException,
+    ) as e:
         print(f"Warning: Warmup probe failed ({e})")
 
     print("Running benchmark...\n")
@@ -159,7 +171,9 @@ def run_benchmark(
     bench_start = time.perf_counter()
 
     with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(fetch, target_url, timeout) for _ in range(total_requests)]
+        futures = [
+            executor.submit(fetch, target_url, timeout) for _ in range(total_requests)
+        ]
 
         for future in as_completed(futures):
             success, latency, status, bytes_count, err = future.result()
@@ -187,13 +201,23 @@ def run_benchmark(
     print(f"{'Total Duration':<24} | {bench_duration:.3f} s")
     print(f"{'Request Throughput':<24} | {rps:,.2f} req/s")
     if rows_per_request > 0:
-        print(f"{'Rows Processed':<24} | {total_rows:,} rows ({rows_per_request:,} rows/req)")
+        print(
+            f"{'Rows Processed':<24} | {total_rows:,} rows ({rows_per_request:,} rows/req)"
+        )
         print(f"{'Row Throughput':<24} | {fmt_rows_s(rows_per_sec)}")
-    print(f"{'Data Transferred':<24} | {format_bytes(total_bytes)} ({total_bytes:,} bytes)")
-    print(f"{'Transfer Rate':<24} | {format_bytes(bytes_per_sec)}/s ({bytes_per_sec:,.2f} B/s)")
+    print(
+        f"{'Data Transferred':<24} | {format_bytes(total_bytes)} ({total_bytes:,} bytes)"
+    )
+    print(
+        f"{'Transfer Rate':<24} | {format_bytes(bytes_per_sec)}/s ({bytes_per_sec:,.2f} B/s)"
+    )
     print(f"{'Total Requests':<24} | {total_requests}")
-    print(f"{'Successful Requests':<24} | {successful_reqs} ({successful_reqs/total_requests * 100:.1f}%)")
-    print(f"{'Failed Requests':<24} | {len(errors)} ({len(errors)/total_requests * 100:.1f}%)")
+    print(
+        f"{'Successful Requests':<24} | {successful_reqs} ({successful_reqs / total_requests * 100:.1f}%)"
+    )
+    print(
+        f"{'Failed Requests':<24} | {len(errors)} ({len(errors) / total_requests * 100:.1f}%)"
+    )
 
     if status_codes:
         print("-" * 75)
