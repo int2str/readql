@@ -67,8 +67,7 @@ pub fn infer_arrow_type(decl_type: Option<&str>, sample_value: Option<&ValueRef>
     }
 }
 
-/// Column metadata consisting of column name and optional declared type.
-pub type ColumnMetadata = (String, Option<String>);
+pub use crate::db::raw_statement::{ColumnMetadata, RawStatement};
 
 /// Extracts column metadata (names and declared types) from a prepared SQLite statement.
 pub fn extract_column_metadata(stmt: &Statement) -> Vec<ColumnMetadata> {
@@ -76,6 +75,30 @@ pub fn extract_column_metadata(stmt: &Statement) -> Vec<ColumnMetadata> {
         .into_iter()
         .map(|col| (col.name().to_string(), col.decl_type().map(String::from)))
         .collect()
+}
+
+/// Infers the Arrow [`Schema`] from extracted column metadata and an active statement positioned at an optional sample row.
+pub fn infer_schema_from_statement(
+    columns: &[ColumnMetadata],
+    stmt: &RawStatement,
+    has_row: bool,
+) -> SchemaRef {
+    let fields = columns
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, decl))| {
+            let data_type = if let Some(decl) = decl {
+                infer_arrow_type(Some(decl), None)
+            } else if has_row {
+                stmt.sample_data_type(idx)
+            } else {
+                DataType::Utf8
+            };
+            Field::new(name, data_type, true)
+        })
+        .collect::<Vec<_>>();
+
+    Arc::new(Schema::new(fields))
 }
 
 /// Infers the Arrow [`Schema`] from extracted column metadata and an optional sample row.
@@ -235,6 +258,50 @@ impl RecordBatchAccumulator {
         }
         self.count += 1;
         Ok(())
+    }
+
+    /// Appends a SQLite row directly from a [`RawStatement`] with zero per-cell reflection overhead.
+    pub fn append_raw_row(&mut self, stmt: &RawStatement) {
+        for (col_idx, appender) in self.appenders.iter_mut().enumerate() {
+            match appender {
+                ColumnAppender::Float64(builder) => {
+                    if stmt.is_null(col_idx) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(stmt.column_double(col_idx));
+                    }
+                }
+                ColumnAppender::Int64(builder) => {
+                    if stmt.is_null(col_idx) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(stmt.column_int64(col_idx));
+                    }
+                }
+                ColumnAppender::Boolean(builder) => {
+                    if stmt.is_null(col_idx) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(stmt.column_int64(col_idx) != 0);
+                    }
+                }
+                ColumnAppender::Utf8(builder) => {
+                    if stmt.is_null(col_idx) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(stmt.column_text(col_idx));
+                    }
+                }
+                ColumnAppender::Binary(builder) => {
+                    if stmt.is_null(col_idx) {
+                        builder.append_null();
+                    } else {
+                        builder.append_value(stmt.column_blob(col_idx));
+                    }
+                }
+            }
+        }
+        self.count += 1;
     }
 
     /// Returns `true` if the accumulator has reached its batch capacity.

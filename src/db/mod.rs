@@ -24,6 +24,9 @@ pub use parquet::query_as_parquet_stream;
 pub mod pool;
 pub use pool::ConnectionPool;
 
+pub mod raw_statement;
+pub use raw_statement::{ColumnMetadata, RawStatement};
+
 pub const CHUNK_SIZE: usize = 64 * 1_024; // 64 KB per CSV/Parquet chunk
 pub const CHANNEL_CAPACITY: usize = 16; // Max 16 chunks buffered (~1 MB max in-memory)
 

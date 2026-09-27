@@ -25,56 +25,19 @@ use arrow_schema::SchemaRef;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_rusqlite::Connection;
-use tokio_rusqlite::rusqlite::{Error as RusqliteError, Rows};
+use tokio_rusqlite::rusqlite::Error as RusqliteError;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::chunk_writer::ChunkWriter;
 use super::{CHANNEL_CAPACITY, CHUNK_SIZE};
 use crate::AppError;
 use crate::parquet_format::{
-    RecordBatchAccumulator, create_parquet_writer, extract_column_metadata,
-    infer_schema_from_metadata,
+    RawStatement, RecordBatchAccumulator, create_parquet_writer, infer_schema_from_statement,
 };
 
 const ROW_BATCH_SIZE: usize = 65_356; // Max rows per Arrow RecordBatch
 
 const RECORD_BATCH_CHANNEL_CAPACITY: usize = 8; // Max 8 RecordBatches queued (~2.5 MB)
-
-/// Reads SQLite rows, accumulates them into Arrow [`RecordBatch`]es, and sends them to the channel.
-fn produce_parquet_batches(
-    rows: &mut Rows<'_>,
-    mut accumulator: RecordBatchAccumulator,
-    has_first_row: bool,
-    batch_sender: &mpsc::Sender<RecordBatch>,
-    row_counter: Option<&AtomicU64>,
-) -> Result<(), RusqliteError> {
-    if has_first_row {
-        while let Some(row) = rows.next()? {
-            if let Some(counter) = row_counter {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
-            accumulator.append_row(row)?;
-
-            if accumulator.is_full() {
-                let batch = accumulator
-                    .finish_batch()
-                    .map_err(|error| RusqliteError::ToSqlConversionFailure(Box::new(error)))?;
-                if batch_sender.blocking_send(batch).is_err() {
-                    return Ok(()); // Consumer disconnected
-                }
-            }
-        }
-    }
-
-    if !accumulator.is_empty() || !has_first_row {
-        let batch = accumulator
-            .finish_batch()
-            .map_err(|error| RusqliteError::ToSqlConversionFailure(Box::new(error)))?;
-        let _ = batch_sender.blocking_send(batch);
-    }
-
-    Ok(())
-}
 
 /// Consumes Arrow [`RecordBatch`]es from a channel, encodes them into Parquet format,
 /// and streams the chunks out.
@@ -123,7 +86,7 @@ fn execute_parquet_producer(
     chunk_sender: &mpsc::Sender<Result<Bytes, std::io::Error>>,
     row_counter: Option<&AtomicU64>,
 ) -> Result<(), RusqliteError> {
-    let mut prepared_statement = match raw_connection.prepare(sql_query) {
+    let mut stmt = match RawStatement::prepare(raw_connection, sql_query) {
         Ok(statement) => statement,
         Err(error) => {
             let _ = schema_sender.send(Err(error));
@@ -131,28 +94,17 @@ fn execute_parquet_producer(
         }
     };
 
-    let column_metadata = extract_column_metadata(&prepared_statement);
+    let column_metadata = stmt.extract_column_metadata();
 
-    let mut query_rows = match prepared_statement.query([]) {
-        Ok(rows) => rows,
+    let has_first_row = match stmt.step() {
+        Ok(has_row) => has_row,
         Err(error) => {
-            tracing::error!("Failed to execute query: {error}");
             let _ = schema_sender.send(Err(error));
             return Ok(());
         }
     };
 
-    let first_row = match query_rows.next() {
-        Ok(row) => row,
-        Err(error) => {
-            tracing::error!("Failed to fetch initial row: {error}");
-            let _ = schema_sender.send(Err(error));
-            return Ok(());
-        }
-    };
-
-    let schema = infer_schema_from_metadata(&column_metadata, first_row);
-    let has_first_row = first_row.is_some();
+    let schema = infer_schema_from_statement(&column_metadata, &stmt, has_first_row);
 
     if schema_sender.send(Ok(schema.clone())).is_err() {
         return Ok(());
@@ -160,27 +112,40 @@ fn execute_parquet_producer(
 
     let mut accumulator = RecordBatchAccumulator::new(schema, ROW_BATCH_SIZE);
 
-    if let Some(row) = first_row {
-        if let Some(counter) = row_counter {
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-        if let Err(error) = accumulator.append_row(row) {
-            tracing::error!("Failed to append first row: {error}");
-            let _ = chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
-            return Ok(());
+    if has_first_row {
+        loop {
+            if let Some(counter) = row_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            accumulator.append_raw_row(&stmt);
+
+            if accumulator.is_full() {
+                let batch = accumulator
+                    .finish_batch()
+                    .map_err(|error| RusqliteError::ToSqlConversionFailure(Box::new(error)))?;
+                if batch_sender.blocking_send(batch).is_err() {
+                    return Ok(()); // Consumer disconnected
+                }
+            }
+
+            match stmt.step() {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(error) => {
+                    tracing::error!("Failed to step SQL query: {error}");
+                    let _ =
+                        chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+                    return Ok(());
+                }
+            }
         }
     }
 
-    if let Err(error) = produce_parquet_batches(
-        &mut query_rows,
-        accumulator,
-        has_first_row,
-        batch_sender,
-        row_counter,
-    ) && !chunk_sender.is_closed()
-    {
-        tracing::error!("Failed to produce Parquet batches: {error}");
-        let _ = chunk_sender.blocking_send(Err(std::io::Error::other(error.to_string())));
+    if !accumulator.is_empty() || !has_first_row {
+        let batch = accumulator
+            .finish_batch()
+            .map_err(|error| RusqliteError::ToSqlConversionFailure(Box::new(error)))?;
+        let _ = batch_sender.blocking_send(batch);
     }
 
     Ok(())
