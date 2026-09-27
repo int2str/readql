@@ -122,7 +122,7 @@ curl http://localhost:8002/api/metrics
 
 `readql` ships with an embedded single-page application on port `8001` (`http://localhost:8001`) with zero external dependencies:
 - **Query Studio:** Interactive table explorer, SQL query editor (`Ctrl+Enter`), query history in `localStorage`, data grid, and 1-click export (CSV, Parquet, Python Pandas/Polars snippets).
-- **Live Dashboard:** Real-time KPI summary cards, hardware-accelerated 60s Canvas graphs (Req/s throughput and MB/s transfer rate), active client host statistics table, and recent query execution log.
+- **Live Dashboard:** Real-time KPI summary cards, hardware-accelerated 60s Canvas graphs (Rows/s throughput and MB/s transfer rate), active client host statistics table, and recent query execution log.
 
 ## Development & Testing
 

@@ -842,20 +842,20 @@
 
       <!-- Real-Time Charts -->
       <div class="charts-grid">
-        <!-- Request Throughput Chart -->
+        <!-- Row Throughput Chart -->
         <div class="chart-card">
           <div class="chart-header">
             <div class="chart-title">
-              <span>⚡</span> Request Throughput (Req/s - Last 60s)
+              <span>⚡</span> Row Throughput (Rows/s - Last 60s)
             </div>
-            <div class="chart-meta" id="chart-rps-meta">0.0 req/s</div>
+            <div class="chart-meta" id="chart-rows-meta">0 rows/s</div>
           </div>
           <div class="canvas-container">
-            <canvas id="canvas-rps" class="metric-canvas"></canvas>
+            <canvas id="canvas-rows" class="metric-canvas"></canvas>
           </div>
         </div>
 
-        <!-- Transfer Rate & Rows Chart -->
+        <!-- Transfer Rate Chart -->
         <div class="chart-card">
           <div class="chart-header">
             <div class="chart-title">
@@ -1291,7 +1291,7 @@
 
       // 2. Render Canvas Graphs
       const history = data.throughput_history_60s || [];
-      renderThroughputChart(history, data.current_rps);
+      renderRowThroughputChart(history, data.current_rows_per_sec);
       renderBandwidthChart(history, data.current_bytes_per_sec);
 
       // 3. Render Clients Table
@@ -1347,7 +1347,7 @@
     }
 
     // Zero-dependency HTML5 Canvas rendering for smooth time-series graphs
-    function drawLineChart(canvasId, values, colorPrimary, colorGlow, maxValOverride) {
+    function drawLineChart(canvasId, values, colorPrimary, colorGlow, maxValOverride, formatMaxVal) {
       const canvas = document.getElementById(canvasId);
       if (!canvas) return;
 
@@ -1367,8 +1367,9 @@
 
       ctx.clearRect(0, 0, width, height);
 
-      // Grid background lines
-      ctx.strokeStyle = 'rgba(46, 61, 86, 0.4)';
+      // Grid background lines & Max scale label
+      const gridColor = 'rgba(75, 95, 130, 0.6)';
+      ctx.strokeStyle = gridColor;
       ctx.lineWidth = 1;
       ctx.beginPath();
       for (let y = 0.25; y <= 0.75; y += 0.25) {
@@ -1446,19 +1447,43 @@
       ctx.arc(width - 2, lastY, 4, 0, Math.PI * 2);
       ctx.fill();
 
+      // Maximum scale value in the top right of the graph
+      const maxLabel = formatMaxVal 
+        ? (typeof formatMaxVal === 'function' ? formatMaxVal(maxVal) : String(formatMaxVal))
+        : `max: ${maxVal >= 10 ? Math.round(maxVal).toLocaleString() : maxVal.toFixed(1)}`;
+
+      ctx.fillStyle = gridColor;
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(maxLabel, width - 10, 7);
+
       ctx.restore();
     }
 
-    function renderThroughputChart(history, currentRps) {
-      document.getElementById('chart-rps-meta').innerText = `${currentRps.toFixed(1)} req/s`;
-      const reqs = history.map(p => p.requests);
-      drawLineChart('canvas-rps', reqs, '#38bdf8', 'rgba(56, 189, 248, 0.25)');
+    function renderRowThroughputChart(history, currentRowsSec) {
+      const meta = document.getElementById('chart-rows-meta');
+      if (meta) {
+        const val = currentRowsSec || 0;
+        const formatted = val >= 10 
+          ? Math.round(val).toLocaleString() 
+          : (val > 0 ? val.toFixed(1) : '0');
+        meta.innerText = `${formatted} rows/s`;
+      }
+      const rows = history.map(p => p.rows);
+      drawLineChart('canvas-rows', rows, '#38bdf8', 'rgba(56, 189, 248, 0.25)', null, max => {
+        const formatted = max === 1 ? '1 row/s' : `${Math.round(max).toLocaleString()} rows/s`;
+        return `max: ${formatted}`;
+      });
     }
+    const renderThroughputChart = renderRowThroughputChart;
 
     function renderBandwidthChart(history, currentBytesSec) {
       document.getElementById('chart-bytes-meta').innerText = `${formatBytes(currentBytesSec)}/s`;
       const mbs = history.map(p => p.bytes / (1024 * 1024));
-      drawLineChart('canvas-bytes', mbs, '#a855f7', 'rgba(168, 85, 247, 0.25)');
+      drawLineChart('canvas-bytes', mbs, '#a855f7', 'rgba(168, 85, 247, 0.25)', null, max => {
+        return `max: ${formatBytes(max * 1024 * 1024)}/s`;
+      });
     }
 
     function openSettingsDialog() {
